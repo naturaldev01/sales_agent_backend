@@ -1,0 +1,565 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
+import { v4 as uuidv4 } from 'uuid';
+import {
+  SupabaseService,
+  Lead,
+  LeadProfile,
+  Conversation,
+  Message,
+} from '../../common/supabase/supabase.service';
+import { QueueService } from '../../common/queue/queue.service';
+import { StateMachineService, LeadStatus } from './state-machine.service';
+import { NormalizedMessage } from '../webhooks/interfaces/normalized-message.interface';
+
+@Injectable()
+export class OrchestratorService {
+  private readonly logger = new Logger(OrchestratorService.name);
+  private readonly telegramBotToken: string;
+  
+  // Photo debounce tracking: leadId -> { timeout, conversationId, messageId, language }
+  private photoDebounceMap: Map<string, {
+    timeout: NodeJS.Timeout;
+    conversationId: string;
+    messageId: string;
+    language: string;
+    photoCount: number;
+  }> = new Map();
+  
+  // Debounce delay in milliseconds (wait for more photos)
+  private readonly PHOTO_DEBOUNCE_DELAY = 5000; // 5 seconds
+
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly queueService: QueueService,
+    private readonly stateMachine: StateMachineService,
+    private readonly configService: ConfigService,
+  ) {
+    this.telegramBotToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN', '');
+  }
+
+  async handleIncomingMessage(message: NormalizedMessage): Promise<void> {
+    this.logger.log(`Handling incoming message from ${message.channel}:${message.channelUserId}`);
+
+    try {
+      // 1. Check for duplicate message (idempotency)
+      const existingMessage = await this.supabase.getMessageByChannelId(message.channelMessageId);
+      if (existingMessage) {
+        this.logger.debug(`Duplicate message detected: ${message.channelMessageId}`);
+        return;
+      }
+
+      // 2. Find or create lead
+      let lead: (Lead & { lead_profile: LeadProfile | null }) | null = 
+        await this.supabase.getLeadByChannelUser(message.channel, message.channelUserId);
+      
+      if (!lead) {
+        const newLead = await this.createNewLead(message);
+        lead = await this.supabase.getLeadById(newLead.id);
+        this.logger.log(`New lead created: ${newLead.id}`);
+      } else {
+        this.logger.log(`Existing lead found: ${lead.id}`);
+        
+        // Cancel pending follow-ups since user responded
+        await this.supabase.cancelPendingFollowups(lead.id);
+        
+        // Mark any pending follow-ups as responded
+        await this.markFollowupsAsResponded(lead.id);
+      }
+
+      if (!lead) {
+        throw new Error('Failed to create or retrieve lead');
+      }
+
+      // 3. Find or create active conversation
+      let conversation: Conversation | null = await this.supabase.getActiveConversation(lead.id);
+      
+      if (!conversation) {
+        conversation = await this.supabase.createConversation({
+          lead_id: lead.id,
+          channel: message.channel,
+        });
+        this.logger.log(`New conversation created: ${conversation.id}`);
+      }
+
+      // 4. Save the incoming message
+      const savedMessage: Message = await this.supabase.createMessage({
+        conversation_id: conversation.id,
+        lead_id: lead.id,
+        direction: 'in',
+        content: message.content,
+        media_type: message.mediaType,
+        media_url: message.mediaUrl,
+        sender_type: 'patient',
+        channel_message_id: message.channelMessageId,
+        metadata: {
+          senderName: message.senderName,
+          senderPhone: message.senderPhone,
+          location: message.location,
+        },
+      });
+
+      this.logger.log(`Message saved: ${savedMessage.id}`);
+
+      // 4.5 If message contains an image, save it to photo_assets
+      if (message.mediaType === 'image' && message.mediaUrl) {
+        try {
+          await this.processAndSavePhoto(lead.id, message);
+          this.logger.log(`Photo saved for lead: ${lead.id}`);
+        } catch (photoError) {
+          this.logger.error('Error saving photo:', photoError);
+          // Continue processing even if photo save fails
+        }
+      }
+
+      // 5. Handle state transition
+      const currentStatus = lead.status as LeadStatus;
+      const newStatus = this.determineNewStatus(currentStatus, message);
+      
+      if (newStatus !== currentStatus) {
+        await this.supabase.updateLead(lead.id, { status: newStatus });
+        this.logger.log(`Lead status updated: ${currentStatus} -> ${newStatus}`);
+      }
+
+      // 5.5 Update lead language if detected from message
+      const detectedLanguage = message.senderLanguage;
+      if (detectedLanguage && detectedLanguage !== lead.language) {
+        await this.supabase.updateLead(lead.id, { language: detectedLanguage });
+        this.logger.log(`Lead language updated to: ${detectedLanguage}`);
+      }
+
+      // Use detected language or fall back to lead's stored language
+      const messageLanguage = detectedLanguage || lead.language || 'en';
+
+      // 6. Queue AI processing (with debounce for photos)
+      if (message.mediaType === 'image') {
+        // For photo messages, use debounce to batch multiple photos
+        await this.queueAiJobWithPhotoDebounce(
+          lead.id,
+          conversation.id,
+          savedMessage.id,
+          messageLanguage,
+        );
+      } else {
+        // For non-photo messages, queue immediately
+      await this.queueService.addAiJob({
+        jobType: 'ANALYZE_AND_DRAFT_REPLY',
+        leadId: lead.id,
+        conversationId: conversation.id,
+        messageId: savedMessage.id,
+        language: messageLanguage,
+        contextWindow: 20,
+      });
+      this.logger.log(`AI job queued for lead: ${lead.id}`);
+      }
+
+    } catch (error) {
+      this.logger.error('Error handling incoming message:', error);
+      throw error;
+    }
+  }
+
+  private async createNewLead(message: NormalizedMessage): Promise<Lead> {
+    // Create lead
+    const lead = await this.supabase.createLead({
+      channel: message.channel,
+      channel_user_id: message.channelUserId,
+      source: `${message.channel}_organic`,
+    });
+
+    // Create initial profile if we have sender info
+    if (message.senderName || message.senderPhone) {
+      await this.supabase.upsertLeadProfile(lead.id, {
+        name: message.senderName,
+        phone: message.senderPhone,
+      });
+    }
+
+    return lead;
+  }
+
+  private determineNewStatus(currentStatus: LeadStatus, message: NormalizedMessage): LeadStatus {
+    // If lead is dormant or waiting and they respond, move to qualifying
+    if (currentStatus === 'DORMANT' || currentStatus === 'WAITING_FOR_USER') {
+      return 'QUALIFYING';
+    }
+
+    // If new lead, start qualifying
+    if (currentStatus === 'NEW') {
+      return 'QUALIFYING';
+    }
+
+    // If they send a photo during photo collection, stay in that state
+    if (currentStatus === 'PHOTO_COLLECTING' && message.mediaType === 'image') {
+      return 'PHOTO_COLLECTING';
+    }
+
+    // If photo was requested and they respond, move to collecting
+    if (currentStatus === 'PHOTO_REQUESTED') {
+      if (message.mediaType === 'image') {
+        return 'PHOTO_COLLECTING';
+      }
+      return 'QUALIFYING';
+    }
+
+    return currentStatus;
+  }
+
+  private async markFollowupsAsResponded(leadId: string): Promise<void> {
+    // This would update any sent but not responded follow-ups
+    // Implementation would depend on your specific needs
+    this.logger.debug(`Marking follow-ups as responded for lead: ${leadId}`);
+  }
+
+  async processAiResponse(data: {
+    leadId: string;
+    conversationId: string;
+    messageId: string;
+    aiRunId: string;
+    replyDraft: string;
+    intent?: Record<string, unknown>;
+    extraction?: Record<string, unknown>;
+    desireScore?: number;
+    shouldHandoff?: boolean;
+    handoffReason?: string;
+    readyForDoctor?: boolean;
+    agentName?: string;  // Virtual agent name for greeting
+    isGreeting?: boolean;  // Flag to indicate greeting response
+  }): Promise<void> {
+    this.logger.log(`Processing AI response for lead: ${data.leadId}`);
+
+    try {
+      const lead = await this.supabase.getLeadById(data.leadId);
+      if (!lead) {
+        throw new Error(`Lead not found: ${data.leadId}`);
+      }
+
+      // Check for handoff
+      if (data.shouldHandoff) {
+        await this.handleHandoff(data.leadId, data.conversationId, data.handoffReason || 'ai_recommendation');
+        return;
+      }
+
+      // Update lead with extracted data
+      const updateData: Record<string, unknown> = {};
+      
+      if (data.desireScore !== undefined) {
+        updateData.desire_score = data.desireScore;
+      }
+
+      // Save agent name if this is a greeting (first contact)
+      if (data.agentName && data.isGreeting) {
+        await this.supabase.upsertLeadProfile(data.leadId, {
+          agent_name: data.agentName,
+        });
+        this.logger.log(`Agent name saved for lead ${data.leadId}: ${data.agentName}`);
+      }
+
+      if (data.extraction) {
+        // Update profile with extracted fields
+        const mappedProfile = this.mapExtractionToProfile(data.extraction);
+        this.logger.log(`Extraction received: ${JSON.stringify(data.extraction)}`);
+        this.logger.log(`Mapped to profile: ${JSON.stringify(mappedProfile)}`);
+        
+        await this.supabase.upsertLeadProfile(data.leadId, {
+          extracted_fields_json: data.extraction,
+          ...mappedProfile,
+        });
+
+        // Check if treatment category was extracted
+        if (data.extraction.treatment_category) {
+          updateData.treatment_category = data.extraction.treatment_category;
+        }
+
+        // Check if language was detected
+        if (data.extraction.language) {
+          updateData.language = data.extraction.language;
+        }
+
+        // Check if country was detected
+        if (data.extraction.country) {
+          updateData.country = data.extraction.country;
+        }
+      }
+
+      // Check if ready for doctor evaluation (all medical history collected)
+      if (data.readyForDoctor) {
+        updateData.status = 'READY_FOR_DOCTOR';
+        this.logger.log(`Lead ${data.leadId} is ready for doctor evaluation - all medical history collected`);
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        await this.supabase.updateLead(data.leadId, updateData);
+      }
+
+      // Save and send the reply
+      if (data.replyDraft) {
+        const replyMessage = await this.supabase.createMessage({
+          conversation_id: data.conversationId,
+          lead_id: data.leadId,
+          direction: 'out',
+          content: data.replyDraft,
+          sender_type: 'ai',
+          ai_run_id: data.aiRunId,
+        });
+
+        // Queue the message to be sent via channel
+        await this.queueService.addChannelSendJob({
+          channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+          channelUserId: lead.channel_user_id!,
+          content: data.replyDraft,
+        });
+
+        this.logger.log(`Reply queued for sending: ${replyMessage.id}`);
+      }
+
+      // Schedule follow-up if needed
+      await this.scheduleFollowupIfNeeded(data.leadId, data.conversationId);
+
+    } catch (error) {
+      this.logger.error('Error processing AI response:', error);
+      throw error;
+    }
+  }
+
+  private mapExtractionToProfile(extraction: Record<string, unknown>): Record<string, unknown> {
+    const mapping: Record<string, string> = {
+      // Personal info
+      name: 'name',
+      phone: 'phone',
+      email: 'email',
+      city: 'city',
+      country: 'country',
+      age: 'age_range',
+      birth_date: 'birth_date',
+      height_cm: 'height_cm',
+      weight_kg: 'weight_kg',
+      
+      // Treatment info
+      complaint: 'complaint',
+      previous_treatment: 'has_previous_treatment',
+      
+      // Medical history
+      has_allergies: 'has_allergies',
+      allergies_detail: 'allergies_detail',
+      has_chronic_disease: 'has_chronic_disease',
+      chronic_disease_detail: 'chronic_disease_detail',
+      has_previous_surgery: 'has_previous_surgery',
+      previous_surgery_detail: 'previous_surgery_detail',
+      alcohol_use: 'alcohol_use',
+      smoking_use: 'smoking_use',
+    };
+
+    const profile: Record<string, unknown> = {};
+    
+    for (const [key, value] of Object.entries(extraction)) {
+      if (mapping[key] && value !== null && value !== undefined) {
+        // Convert yes/no strings to booleans for boolean fields
+        if (['has_allergies', 'has_chronic_disease', 'has_previous_surgery'].includes(key)) {
+          if (typeof value === 'string') {
+            profile[mapping[key]] = value.toLowerCase() === 'yes';
+          } else {
+            profile[mapping[key]] = Boolean(value);
+          }
+        } else {
+        profile[mapping[key]] = value;
+        }
+      }
+    }
+
+    return profile;
+  }
+
+  private async handleHandoff(leadId: string, conversationId: string, reason: string): Promise<void> {
+    this.logger.log(`Initiating handoff for lead: ${leadId}, reason: ${reason}`);
+
+    // Update lead status
+    await this.supabase.updateLead(leadId, { status: 'HANDOFF_HUMAN' });
+
+    // Create handoff record
+    await this.supabase.createHandoff({
+      lead_id: leadId,
+      conversation_id: conversationId,
+      reason: reason,
+      triggered_by: 'ai',
+    });
+
+    // Get lead for channel info
+    const lead = await this.supabase.getLeadById(leadId);
+    if (lead) {
+      // Send handoff message to user
+      const handoffMessage = this.getHandoffMessage(lead.language || 'en');
+      
+      await this.supabase.createMessage({
+        conversation_id: conversationId,
+        lead_id: leadId,
+        direction: 'out',
+        content: handoffMessage,
+        sender_type: 'system',
+      });
+
+      await this.queueService.addChannelSendJob({
+        channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+        channelUserId: lead.channel_user_id!,
+        content: handoffMessage,
+      });
+    }
+  }
+
+  private getHandoffMessage(language: string): string {
+    const messages: Record<string, string> = {
+      en: "I'll connect you with our team member who can better assist you. They'll reach out shortly! 🙂",
+      tr: "Sizi daha iyi yardımcı olabilecek ekip arkadaşımıza bağlıyorum. Kısa süre içinde size ulaşacaklar! 🙂",
+      ar: "سأوصلك بأحد أعضاء فريقنا الذي يمكنه مساعدتك بشكل أفضل. سيتواصلون معك قريبًا! 🙂",
+      ru: "Я свяжу вас с нашим специалистом, который сможет лучше вам помочь. Они скоро свяжутся с вами! 🙂",
+    };
+
+    return messages[language] || messages.en;
+  }
+
+  private async processAndSavePhoto(leadId: string, message: NormalizedMessage): Promise<void> {
+    if (!message.mediaUrl) return;
+
+    const fileId = message.mediaUrl;
+    let fileUrl: string | null = null;
+    let fileBuffer: Buffer | null = null;
+
+    // For Telegram, we need to get the file URL first
+    if (message.channel === 'telegram' && this.telegramBotToken) {
+      try {
+        // Get file path from Telegram
+        const getFileResponse = await axios.get(
+          `https://api.telegram.org/bot${this.telegramBotToken}/getFile`,
+          { params: { file_id: fileId } }
+        );
+
+        const filePath = getFileResponse.data.result?.file_path;
+        if (filePath) {
+          fileUrl = `https://api.telegram.org/file/bot${this.telegramBotToken}/${filePath}`;
+          
+          // Download the file
+          const downloadResponse = await axios.get(fileUrl, {
+            responseType: 'arraybuffer',
+          });
+          fileBuffer = Buffer.from(downloadResponse.data);
+        }
+      } catch (error) {
+        this.logger.error('Failed to download Telegram photo:', error);
+        throw error;
+      }
+    }
+
+    if (!fileBuffer) {
+      this.logger.warn('Could not download photo file');
+      return;
+    }
+
+    // Generate unique file name
+    const assetId = uuidv4();
+    const extension = 'jpg'; // Most Telegram photos are JPEG
+    const storagePath = `leads/${leadId}/${assetId}.${extension}`;
+
+    // Upload to Supabase Storage
+    const { error: uploadError } = await this.supabase.client.storage
+      .from('lead-media-private')
+      .upload(storagePath, fileBuffer, {
+        contentType: 'image/jpeg',
+        upsert: false,
+      });
+
+    if (uploadError) {
+      this.logger.error('Failed to upload photo to storage:', uploadError);
+      throw uploadError;
+    }
+
+    // Save to photo_assets table
+    await this.supabase.createPhotoAsset({
+      lead_id: leadId,
+      storage_path: storagePath,
+      file_name: `${assetId}.${extension}`,
+      file_size: fileBuffer.length,
+      mime_type: 'image/jpeg',
+    });
+
+    this.logger.log(`Photo uploaded: ${storagePath}`);
+  }
+
+  private async queueAiJobWithPhotoDebounce(
+    leadId: string,
+    conversationId: string,
+    messageId: string,
+    language: string,
+  ): Promise<void> {
+    const existingDebounce = this.photoDebounceMap.get(leadId);
+
+    if (existingDebounce) {
+      // Clear existing timeout and update with new message info
+      clearTimeout(existingDebounce.timeout);
+      existingDebounce.photoCount += 1;
+      existingDebounce.messageId = messageId; // Use latest message ID
+      this.logger.log(`Photo debounce updated for lead ${leadId}, count: ${existingDebounce.photoCount}`);
+    }
+
+    const photoCount = existingDebounce?.photoCount ?? 1;
+
+    // Set new timeout
+    const timeout = setTimeout(async () => {
+      this.photoDebounceMap.delete(leadId);
+      
+      this.logger.log(`Photo debounce triggered for lead ${leadId}, processing ${photoCount} photo(s)`);
+      
+      // Queue the AI job after debounce delay
+      await this.queueService.addAiJob({
+        jobType: 'ANALYZE_AND_DRAFT_REPLY',
+        leadId,
+        conversationId,
+        messageId,
+        language,
+        contextWindow: 20,
+      });
+      
+      this.logger.log(`AI job queued for lead ${leadId} after photo debounce`);
+    }, this.PHOTO_DEBOUNCE_DELAY);
+
+    this.photoDebounceMap.set(leadId, {
+      timeout,
+      conversationId,
+      messageId,
+      language,
+      photoCount,
+    });
+
+    this.logger.log(`Photo debounce set for lead ${leadId}, waiting ${this.PHOTO_DEBOUNCE_DELAY}ms for more photos`);
+  }
+
+  private async scheduleFollowupIfNeeded(leadId: string, conversationId: string): Promise<void> {
+    // Get follow-up settings
+    const settings = await this.supabase.getConfig('followup_settings') as {
+      intervals_hours?: number[];
+      max_attempts?: number;
+    } | null;
+    
+    if (!settings) return;
+
+    const intervals = settings.intervals_hours || [2, 24, 72];
+    const maxAttempts = settings.max_attempts || 3;
+
+    // Check existing follow-ups
+    // For now, just schedule the first follow-up
+    // A more complete implementation would check existing follow-ups
+
+    const scheduledAt = new Date();
+    scheduledAt.setHours(scheduledAt.getHours() + intervals[0]);
+
+    await this.supabase.createFollowup({
+      lead_id: leadId,
+      conversation_id: conversationId,
+      followup_type: 'reminder',
+      attempt_number: 1,
+      scheduled_at: scheduledAt.toISOString(),
+    });
+
+    this.logger.debug(`Follow-up scheduled for lead ${leadId} at ${scheduledAt.toISOString()}`);
+  }
+}
