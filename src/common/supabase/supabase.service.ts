@@ -592,6 +592,97 @@ export class SupabaseService implements OnModuleInit {
     return data || [];
   }
 
+  /**
+   * Get photo checklist with template image for a specific treatment and language
+   * Returns the checklist items with localized display names and instructions
+   */
+  async getPhotoChecklistWithTemplate(
+    treatmentCategory: string,
+    language: string = 'en',
+  ): Promise<{
+    items: Array<{
+      checklist_key: string;
+      display_name: string;
+      instructions: string;
+      is_required: boolean;
+      sort_order: number;
+    }>;
+    template_image_path: string | null;
+  }> {
+    const { data, error } = await this.supabase
+      .from('photo_checklists')
+      .select('*')
+      .eq('treatment_category', treatmentCategory)
+      .eq('is_active', true)
+      .order('sort_order', { ascending: true });
+
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      return { items: [], template_image_path: null };
+    }
+
+    // Get template image path from first item (all items in same category share same template)
+    const templatePath = data[0].template_image_path || null;
+
+    // Map to localized fields based on language
+    const langSuffix = language.toLowerCase();
+    const items = data.map((item) => {
+      // Get display name in order: requested language -> english -> first available
+      const displayName =
+        (item as Record<string, string | null>)[`display_name_${langSuffix}`] ||
+        item.display_name_en ||
+        item.checklist_key;
+
+      // Get instructions in order: requested language -> english -> empty
+      const instructions =
+        (item as Record<string, string | null>)[`instructions_${langSuffix}`] ||
+        item.instructions_en ||
+        '';
+
+      return {
+        checklist_key: item.checklist_key,
+        display_name: displayName,
+        instructions: instructions,
+        is_required: item.is_required ?? true,
+        sort_order: item.sort_order ?? 0,
+      };
+    });
+
+    return { items, template_image_path: templatePath };
+  }
+
+  /**
+   * Get all treatment categories that have photo checklists
+   */
+  async getAvailableTreatmentCategories(): Promise<string[]> {
+    const { data, error } = await this.supabase
+      .from('photo_checklists')
+      .select('treatment_category')
+      .eq('is_active', true);
+
+    if (error) throw error;
+    
+    // Get unique categories
+    const categories = [...new Set(data?.map(d => d.treatment_category) || [])];
+    return categories;
+  }
+
+  /**
+   * Get template image path for a treatment category
+   */
+  async getTemplateImagePath(treatmentCategory: string): Promise<string | null> {
+    const { data, error } = await this.supabase
+      .from('photo_checklists')
+      .select('template_image_path')
+      .eq('treatment_category', treatmentCategory)
+      .eq('is_active', true)
+      .limit(1)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data?.template_image_path || null;
+  }
+
   // ==================== SYSTEM CONFIGS ====================
 
   async getConfig(key: string): Promise<Json | null> {

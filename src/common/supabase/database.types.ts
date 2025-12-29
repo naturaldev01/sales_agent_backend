@@ -16,34 +16,34 @@ export type Database = {
     Tables: {
       ai_message_feedback: {
         Row: {
+          comment: string | null
+          created_at: string | null
           id: string
           message_id: string
-          user_id: string
           rating: string
-          comment: string | null
           suggested_response: string | null
-          created_at: string | null
           updated_at: string | null
+          user_id: string
         }
         Insert: {
+          comment?: string | null
+          created_at?: string | null
           id?: string
           message_id: string
-          user_id: string
           rating: string
-          comment?: string | null
           suggested_response?: string | null
-          created_at?: string | null
           updated_at?: string | null
+          user_id: string
         }
         Update: {
+          comment?: string | null
+          created_at?: string | null
           id?: string
           message_id?: string
-          user_id?: string
           rating?: string
-          comment?: string | null
           suggested_response?: string | null
-          created_at?: string | null
           updated_at?: string | null
+          user_id?: string
         }
         Relationships: [
           {
@@ -437,6 +437,75 @@ export type Database = {
           },
         ]
       }
+      knowledge_base: {
+        Row: {
+          bad_response: string | null
+          category: string
+          context_notes: string | null
+          created_at: string | null
+          created_by: string | null
+          good_response: string
+          id: string
+          is_active: boolean | null
+          language: string | null
+          priority: number | null
+          scenario: string | null
+          source_feedback_id: string | null
+          trigger_keywords: string[] | null
+          updated_at: string | null
+          usage_count: number | null
+        }
+        Insert: {
+          bad_response?: string | null
+          category: string
+          context_notes?: string | null
+          created_at?: string | null
+          created_by?: string | null
+          good_response: string
+          id?: string
+          is_active?: boolean | null
+          language?: string | null
+          priority?: number | null
+          scenario?: string | null
+          source_feedback_id?: string | null
+          trigger_keywords?: string[] | null
+          updated_at?: string | null
+          usage_count?: number | null
+        }
+        Update: {
+          bad_response?: string | null
+          category?: string
+          context_notes?: string | null
+          created_at?: string | null
+          created_by?: string | null
+          good_response?: string
+          id?: string
+          is_active?: boolean | null
+          language?: string | null
+          priority?: number | null
+          scenario?: string | null
+          source_feedback_id?: string | null
+          trigger_keywords?: string[] | null
+          updated_at?: string | null
+          usage_count?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "knowledge_base_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "knowledge_base_source_feedback_id_fkey"
+            columns: ["source_feedback_id"]
+            isOneToOne: false
+            referencedRelation: "ai_message_feedback"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       lead_profile: {
         Row: {
           age_range: string | null
@@ -537,75 +606,6 @@ export type Database = {
             columns: ["lead_id"]
             isOneToOne: true
             referencedRelation: "leads"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      knowledge_base: {
-        Row: {
-          id: string
-          category: string
-          language: string | null
-          trigger_keywords: string[] | null
-          scenario: string | null
-          bad_response: string | null
-          good_response: string
-          context_notes: string | null
-          source_feedback_id: string | null
-          is_active: boolean | null
-          priority: number | null
-          usage_count: number | null
-          created_by: string | null
-          created_at: string | null
-          updated_at: string | null
-        }
-        Insert: {
-          id?: string
-          category: string
-          language?: string | null
-          trigger_keywords?: string[] | null
-          scenario?: string | null
-          bad_response?: string | null
-          good_response: string
-          context_notes?: string | null
-          source_feedback_id?: string | null
-          is_active?: boolean | null
-          priority?: number | null
-          usage_count?: number | null
-          created_by?: string | null
-          created_at?: string | null
-          updated_at?: string | null
-        }
-        Update: {
-          id?: string
-          category?: string
-          language?: string | null
-          trigger_keywords?: string[] | null
-          scenario?: string | null
-          bad_response?: string | null
-          good_response?: string
-          context_notes?: string | null
-          source_feedback_id?: string | null
-          is_active?: boolean | null
-          priority?: number | null
-          usage_count?: number | null
-          created_by?: string | null
-          created_at?: string | null
-          updated_at?: string | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "knowledge_base_source_feedback_id_fkey"
-            columns: ["source_feedback_id"]
-            isOneToOne: false
-            referencedRelation: "ai_message_feedback"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "knowledge_base_created_by_fkey"
-            columns: ["created_by"]
-            isOneToOne: false
-            referencedRelation: "users"
             referencedColumns: ["id"]
           },
         ]
@@ -805,16 +805,20 @@ export type Database = {
           created_at: string | null
           display_name_ar: string | null
           display_name_en: string | null
+          display_name_fr: string | null
           display_name_ru: string | null
           display_name_tr: string | null
           id: string
           instructions_ar: string | null
           instructions_en: string | null
+          instructions_fr: string | null
           instructions_ru: string | null
           instructions_tr: string | null
           is_active: boolean | null
           is_required: boolean | null
           sort_order: number | null
+          template_image_path: string | null
+          template_image_url: string | null
           treatment_category: string
         }
         Insert: {
@@ -822,16 +826,20 @@ export type Database = {
           created_at?: string | null
           display_name_ar?: string | null
           display_name_en?: string | null
+          display_name_fr?: string | null
           display_name_ru?: string | null
           display_name_tr?: string | null
           id?: string
           instructions_ar?: string | null
           instructions_en?: string | null
+          instructions_fr?: string | null
           instructions_ru?: string | null
           instructions_tr?: string | null
           is_active?: boolean | null
           is_required?: boolean | null
           sort_order?: number | null
+          template_image_path?: string | null
+          template_image_url?: string | null
           treatment_category: string
         }
         Update: {
@@ -839,16 +847,20 @@ export type Database = {
           created_at?: string | null
           display_name_ar?: string | null
           display_name_en?: string | null
+          display_name_fr?: string | null
           display_name_ru?: string | null
           display_name_tr?: string | null
           id?: string
           instructions_ar?: string | null
           instructions_en?: string | null
+          instructions_fr?: string | null
           instructions_ru?: string | null
           instructions_tr?: string | null
           is_active?: boolean | null
           is_required?: boolean | null
           sort_order?: number | null
+          template_image_path?: string | null
+          template_image_url?: string | null
           treatment_category?: string
         }
         Relationships: []

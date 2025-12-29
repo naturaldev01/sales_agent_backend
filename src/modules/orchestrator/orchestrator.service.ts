@@ -12,6 +12,7 @@ import {
 import { QueueService } from '../../common/queue/queue.service';
 import { StateMachineService, LeadStatus } from './state-machine.service';
 import { NormalizedMessage } from '../webhooks/interfaces/normalized-message.interface';
+import { PhotosService } from '../photos/photos.service';
 
 @Injectable()
 export class OrchestratorService {
@@ -35,6 +36,7 @@ export class OrchestratorService {
     private readonly queueService: QueueService,
     private readonly stateMachine: StateMachineService,
     private readonly configService: ConfigService,
+    private readonly photosService: PhotosService,
   ) {
     this.telegramBotToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN', '');
   }
@@ -304,6 +306,20 @@ export class OrchestratorService {
           ai_run_id: data.aiRunId,
         });
 
+        // Check if this is a photo request and we should send a template image
+        const isPhotoRequest = this.isPhotoRequestMessage(data.replyDraft, lead.language || 'en');
+        const treatmentCategory = lead.treatment_category;
+        
+        if (isPhotoRequest && treatmentCategory) {
+          // Try to send template image first
+          await this.sendTemplateImageIfAvailable(
+            lead.channel as 'whatsapp' | 'telegram' | 'web',
+            lead.channel_user_id!,
+            treatmentCategory,
+            lead.language || 'en',
+          );
+        }
+
         // Queue the message to be sent via channel
         await this.queueService.addChannelSendJob({
           channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
@@ -416,6 +432,129 @@ export class OrchestratorService {
     };
 
     return messages[language] || messages.en;
+  }
+
+  /**
+   * Check if a message is requesting photos from the user
+   */
+  private isPhotoRequestMessage(message: string, language: string): boolean {
+    const photoKeywords: Record<string, string[]> = {
+      en: ['photo', 'picture', 'image', 'send us', 'share', 'upload'],
+      tr: ['fotoğraf', 'resim', 'görsel', 'gönderin', 'paylaşın', 'yükleyin'],
+      ar: ['صور', 'صورة', 'ارسل', 'شارك'],
+      ru: ['фото', 'фотографи', 'снимок', 'отправьте', 'загрузите'],
+      fr: ['photo', 'image', 'envoyez', 'partagez'],
+    };
+
+    const keywords = photoKeywords[language] || photoKeywords.en;
+    const messageLower = message.toLowerCase();
+    
+    return keywords.some(keyword => messageLower.includes(keyword));
+  }
+
+  /**
+   * Send template image to user if available for their treatment category
+   */
+  private async sendTemplateImageIfAvailable(
+    channel: 'whatsapp' | 'telegram' | 'web',
+    channelUserId: string,
+    treatmentCategory: string,
+    language: string,
+  ): Promise<boolean> {
+    try {
+      // Get template image for the treatment
+      const imageData = await this.photosService.getTemplateImageBuffer(treatmentCategory, language);
+      
+      if (!imageData) {
+        this.logger.debug(`No template image available for ${treatmentCategory}/${language}`);
+        return false;
+      }
+
+      // Send the template image via the appropriate channel
+      if (channel === 'telegram' && this.telegramBotToken) {
+        await this.sendTelegramPhoto(channelUserId, imageData.buffer, this.getTemplateCaption(treatmentCategory, language));
+        this.logger.log(`Template image sent for ${treatmentCategory} to ${channel}:${channelUserId}`);
+        return true;
+      }
+      
+      // For WhatsApp, we would use the WhatsApp Business API
+      // For web, we might use a different approach (e.g., URL)
+      this.logger.debug(`Template image sending not implemented for channel: ${channel}`);
+      return false;
+    } catch (error) {
+      this.logger.error(`Failed to send template image for ${treatmentCategory}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get caption text for template image
+   */
+  private getTemplateCaption(treatmentCategory: string, language: string): string {
+    const captions: Record<string, Record<string, string>> = {
+      en: {
+        default: 'Please send us photos like the examples shown above for a better evaluation 📸',
+        hair_transplant: 'For an accurate hair transplant assessment, please send photos from these angles 📸',
+        dental: 'Please send clear photos of your teeth as shown in the example 📸',
+        rhinoplasty: 'For nose surgery evaluation, please share photos from these angles 📸',
+        breast: 'Please send photos from these angles for accurate breast surgery assessment 📸',
+        liposuction: 'For body contouring evaluation, please share full body photos as shown 📸',
+        bbl: 'For BBL assessment, please send photos from these angles 📸',
+        arm_lift: 'For arm lift evaluation, please share photos as shown in the example 📸',
+        facelift: 'For facelift evaluation, please share photos of your face from these angles 📸',
+      },
+      tr: {
+        default: 'Daha iyi bir değerlendirme için lütfen yukarıdaki örneklere benzer fotoğraflar gönderin 📸',
+        hair_transplant: 'Doğru bir saç ekimi değerlendirmesi için lütfen bu açılardan fotoğraf gönderin 📸',
+        dental: 'Lütfen örnekte gösterildiği gibi net diş fotoğrafları gönderin 📸',
+        rhinoplasty: 'Burun estetiği değerlendirmesi için lütfen bu açılardan fotoğraf paylaşın 📸',
+        breast: 'Doğru meme estetiği değerlendirmesi için lütfen bu açılardan fotoğraf gönderin 📸',
+        liposuction: 'Liposuction değerlendirmesi için lütfen gösterilen şekilde tam vücut fotoğrafı paylaşın 📸',
+        bbl: 'BBL değerlendirmesi için lütfen bu açılardan fotoğraf gönderin 📸',
+        arm_lift: 'Kol germe değerlendirmesi için lütfen örnekte gösterildiği gibi fotoğraf paylaşın 📸',
+        facelift: 'Yüz germe değerlendirmesi için lütfen bu açılardan yüz fotoğrafı paylaşın 📸',
+      },
+      ar: {
+        default: 'يرجى إرسال صور مثل الأمثلة الموضحة أعلاه لتقييم أفضل 📸',
+        hair_transplant: 'للحصول على تقييم دقيق لزراعة الشعر، يرجى إرسال صور من هذه الزوايا 📸',
+        dental: 'يرجى إرسال صور واضحة لأسنانك كما هو موضح في المثال 📸',
+        rhinoplasty: 'لتقييم جراحة الأنف، يرجى مشاركة صور من هذه الزوايا 📸',
+        breast: 'يرجى إرسال صور من هذه الزوايا لتقييم دقيق لجراحة الثدي 📸',
+      },
+      fr: {
+        default: 'Veuillez nous envoyer des photos comme les exemples ci-dessus pour une meilleure evaluation 📸',
+        hair_transplant: 'Pour une evaluation precise de la greffe de cheveux, veuillez envoyer des photos sous ces angles 📸',
+        dental: 'Veuillez envoyer des photos claires de vos dents comme indique dans exemple 📸',
+        rhinoplasty: 'Pour evaluation de la rhinoplastie, veuillez partager des photos sous ces angles 📸',
+        breast: 'Veuillez envoyer des photos sous ces angles pour une evaluation precise 📸',
+      },
+    };
+
+    const langCaptions = captions[language] || captions.en;
+    return langCaptions[treatmentCategory] || langCaptions.default;
+  }
+
+  /**
+   * Send photo via Telegram
+   */
+  private async sendTelegramPhoto(chatId: string, photoBuffer: Buffer, caption?: string): Promise<void> {
+    if (!this.telegramBotToken) {
+      throw new Error('Telegram bot token not configured');
+    }
+
+    const FormData = require('form-data');
+    const formData = new FormData();
+    formData.append('chat_id', chatId);
+    formData.append('photo', photoBuffer, { filename: 'template.jpeg', contentType: 'image/jpeg' });
+    if (caption) {
+      formData.append('caption', caption);
+    }
+
+    await axios.post(
+      `https://api.telegram.org/bot${this.telegramBotToken}/sendPhoto`,
+      formData,
+      { headers: formData.getHeaders() },
+    );
   }
 
   private async processAndSavePhoto(leadId: string, message: NormalizedMessage): Promise<void> {
