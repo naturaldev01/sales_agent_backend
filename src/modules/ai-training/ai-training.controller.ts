@@ -24,7 +24,7 @@ export class AiTrainingController {
   // ==================== AI MESSAGES ====================
 
   @Get('messages')
-  @Roles('admin', 'doctor', 'sales')
+  @Roles('admin', 'doctor', 'sales_agent')
   async getAiMessages(
     @Query('page') page?: string,
     @Query('limit') limit?: string,
@@ -40,7 +40,7 @@ export class AiTrainingController {
   }
 
   @Get('messages/:messageId')
-  @Roles('admin', 'doctor', 'sales')
+  @Roles('admin', 'doctor', 'sales_agent')
   async getMessageById(@Param('messageId') messageId: string) {
     return this.aiTrainingService.getMessageById(messageId);
   }
@@ -48,13 +48,13 @@ export class AiTrainingController {
   // ==================== FEEDBACK ====================
 
   @Get('stats')
-  @Roles('admin', 'doctor', 'sales')
+  @Roles('admin', 'doctor', 'sales_agent')
   async getFeedbackStats() {
     return this.aiTrainingService.getFeedbackStats();
   }
 
   @Post('messages/:messageId/rate')
-  @Roles('admin', 'doctor', 'sales')
+  @Roles('admin', 'doctor', 'sales_agent')
   @HttpCode(HttpStatus.OK)
   async createFeedback(
     @Param('messageId') messageId: string,
@@ -73,7 +73,7 @@ export class AiTrainingController {
   }
 
   @Patch('messages/:messageId/rate')
-  @Roles('admin', 'doctor', 'sales')
+  @Roles('admin', 'doctor', 'sales_agent')
   async updateFeedback(
     @Param('messageId') messageId: string,
     @Body() body: {
@@ -89,7 +89,7 @@ export class AiTrainingController {
   // ==================== KNOWLEDGE BASE ====================
 
   @Get('knowledge-base')
-  @Roles('admin', 'doctor', 'sales')
+  @Roles('admin', 'doctor', 'sales_agent')
   async getKnowledgeBase(
     @Query('category') category?: string,
     @Query('language') language?: string,
@@ -105,7 +105,7 @@ export class AiTrainingController {
   }
 
   @Get('knowledge-base/:id')
-  @Roles('admin', 'doctor', 'sales')
+  @Roles('admin', 'doctor', 'sales_agent')
   async getKnowledgeBaseById(@Param('id') id: string) {
     return this.aiTrainingService.getKnowledgeBaseById(id);
   }
@@ -167,7 +167,7 @@ export class AiTrainingController {
   // ==================== AI INTEGRATION ====================
 
   @Get('knowledge-base/relevant')
-  @Roles('admin', 'doctor', 'sales')
+  @Roles('admin', 'doctor', 'sales_agent')
   async getRelevantKnowledge(
     @Query('message') message: string,
     @Query('language') language?: string,
