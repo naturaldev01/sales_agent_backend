@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
+import axios, { AxiosInstance } from 'axios';
+import * as https from 'https';
 import { TelegramAdapter } from './adapters/telegram.adapter';
 import { OrchestratorService } from '../orchestrator/orchestrator.service';
 
@@ -9,6 +10,7 @@ export class TelegramPollingService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramPollingService.name);
   private readonly apiUrl: string;
   private readonly botToken: string;
+  private readonly axiosInstance: AxiosInstance;
   private isPolling = false;
   private pollTimeout: NodeJS.Timeout | null = null;
   private lastUpdateId = 0;
@@ -20,6 +22,15 @@ export class TelegramPollingService implements OnModuleInit, OnModuleDestroy {
   ) {
     this.botToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN', '');
     this.apiUrl = `https://api.telegram.org/bot${this.botToken}`;
+    
+    // Create axios instance with IPv4 forced
+    this.axiosInstance = axios.create({
+      timeout: 35000,
+      httpsAgent: new https.Agent({
+        family: 4, // Force IPv4
+        keepAlive: true,
+      }),
+    });
   }
 
   async onModuleInit() {
@@ -51,10 +62,10 @@ export class TelegramPollingService implements OnModuleInit, OnModuleDestroy {
 
   private async deleteWebhook(): Promise<void> {
     try {
-      await axios.post(`${this.apiUrl}/deleteWebhook`);
+      await this.axiosInstance.post(`${this.apiUrl}/deleteWebhook`);
       this.logger.log('Telegram webhook deleted');
-    } catch (error) {
-      this.logger.error('Failed to delete webhook:', error);
+    } catch (error: any) {
+      this.logger.error(`Failed to delete webhook: ${error.message}`);
     }
   }
 
@@ -79,13 +90,12 @@ export class TelegramPollingService implements OnModuleInit, OnModuleDestroy {
     if (!this.isPolling) return;
 
     try {
-      const response = await axios.get(`${this.apiUrl}/getUpdates`, {
+      const response = await this.axiosInstance.get(`${this.apiUrl}/getUpdates`, {
         params: {
           offset: this.lastUpdateId + 1,
           timeout: 30, // Long polling - wait up to 30 seconds
           allowed_updates: ['message'],
         },
-        timeout: 35000, // axios timeout slightly longer than Telegram timeout
       });
 
       const updates = response.data.result || [];
@@ -98,7 +108,7 @@ export class TelegramPollingService implements OnModuleInit, OnModuleDestroy {
       if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
         // Normal timeout, continue polling
       } else {
-        this.logger.error('Polling error:', error.message);
+        this.logger.error(`Polling error: ${error.message}`);
         // Wait a bit before retrying on error
         await new Promise((resolve) => setTimeout(resolve, 5000));
       }
@@ -128,17 +138,24 @@ export class TelegramPollingService implements OnModuleInit, OnModuleDestroy {
   // Method to send message (used by orchestrator)
   async sendMessage(chatId: string, text: string): Promise<string | undefined> {
     try {
-      const response = await axios.post(`${this.apiUrl}/sendMessage`, {
+      this.logger.log(`📤 Attempting to send message to ${chatId}`);
+      
+      const response = await this.axiosInstance.post(`${this.apiUrl}/sendMessage`, {
         chat_id: chatId,
         text: text,
         parse_mode: 'HTML',
       });
 
       const messageId = response.data.result?.message_id?.toString();
-      this.logger.log(`📤 Telegram message sent to ${chatId}: ${messageId}`);
+      this.logger.log(`✅ Telegram message sent to ${chatId}: ${messageId}`);
       return messageId;
     } catch (error: any) {
-      this.logger.error(`Failed to send Telegram message: ${error.message}`);
+      this.logger.error(`❌ Failed to send Telegram message to ${chatId}`);
+      if (error.response) {
+        this.logger.error(`Telegram API Error: ${error.response.status} - ${JSON.stringify(error.response.data)}`);
+      } else {
+        this.logger.error(`Error: ${error.message}`);
+      }
       throw error;
     }
   }

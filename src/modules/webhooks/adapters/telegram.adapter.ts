@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
+import axios, { AxiosInstance } from 'axios';
+import * as https from 'https';
 import { NormalizedMessage, OutgoingMessage } from '../interfaces/normalized-message.interface';
 
 interface TelegramUpdate {
@@ -77,10 +78,20 @@ export class TelegramAdapter {
   private readonly logger = new Logger(TelegramAdapter.name);
   private readonly apiUrl: string;
   private readonly botToken: string;
+  private readonly axiosInstance: AxiosInstance;
 
   constructor(private configService: ConfigService) {
     this.botToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN', '');
     this.apiUrl = `https://api.telegram.org/bot${this.botToken}`;
+    
+    // Create axios instance with IPv4 forced and timeout
+    this.axiosInstance = axios.create({
+      timeout: 30000, // 30 second timeout
+      httpsAgent: new https.Agent({
+        family: 4, // Force IPv4
+        keepAlive: true,
+      }),
+    });
   }
 
   normalizeUpdate(update: TelegramUpdate): NormalizedMessage | null {
@@ -149,12 +160,14 @@ export class TelegramAdapter {
 
   async sendMessage(message: OutgoingMessage): Promise<string> {
     try {
+      this.logger.log(`📤 Attempting to send message to chat_id: ${message.channelUserId}`);
+      
       let response;
 
       if (message.mediaUrl && message.mediaType) {
         // Send media message
         const method = this.getMediaMethod(message.mediaType);
-        response = await axios.post(`${this.apiUrl}/${method}`, {
+        response = await this.axiosInstance.post(`${this.apiUrl}/${method}`, {
           chat_id: message.channelUserId,
           [message.mediaType]: message.mediaUrl,
           caption: message.content,
@@ -162,7 +175,7 @@ export class TelegramAdapter {
         });
       } else {
         // Send text message
-        response = await axios.post(`${this.apiUrl}/sendMessage`, {
+        response = await this.axiosInstance.post(`${this.apiUrl}/sendMessage`, {
           chat_id: message.channelUserId,
           text: message.content,
           parse_mode: 'HTML',
@@ -171,10 +184,30 @@ export class TelegramAdapter {
       }
 
       const messageId = response.data.result?.message_id?.toString();
-      this.logger.log(`Telegram message sent: ${messageId}`);
+      this.logger.log(`✅ Telegram message sent successfully: ${messageId}`);
       return messageId;
-    } catch (error) {
-      this.logger.error('Failed to send Telegram message:', error);
+    } catch (error: any) {
+      // Detailed error logging
+      this.logger.error(`❌ Failed to send Telegram message to ${message.channelUserId}`);
+      
+      if (error.response) {
+        // Telegram API returned an error
+        this.logger.error(`Telegram API Error Status: ${error.response.status}`);
+        this.logger.error(`Telegram API Response: ${JSON.stringify(error.response.data)}`);
+      } else if (error.code) {
+        // Network/system error
+        this.logger.error(`Network Error Code: ${error.code}`);
+        this.logger.error(`Network Error Message: ${error.message}`);
+      } else if (error.errors && Array.isArray(error.errors)) {
+        // AggregateError - multiple errors
+        this.logger.error(`AggregateError with ${error.errors.length} errors:`);
+        error.errors.forEach((e: Error, i: number) => {
+          this.logger.error(`  Error ${i + 1}: ${e.message || e}`);
+        });
+      } else {
+        this.logger.error(`Error: ${error.message || error}`);
+      }
+      
       throw error;
     }
   }
@@ -191,7 +224,7 @@ export class TelegramAdapter {
 
   async getFileUrl(fileId: string): Promise<string> {
     try {
-      const response = await axios.get(`${this.apiUrl}/getFile`, {
+      const response = await this.axiosInstance.get(`${this.apiUrl}/getFile`, {
         params: { file_id: fileId },
       });
 
@@ -200,8 +233,8 @@ export class TelegramAdapter {
         return `https://api.telegram.org/file/bot${this.botToken}/${filePath}`;
       }
       throw new Error('File path not found');
-    } catch (error) {
-      this.logger.error('Failed to get Telegram file URL:', error);
+    } catch (error: any) {
+      this.logger.error(`Failed to get Telegram file URL: ${error.message}`);
       throw error;
     }
   }
@@ -210,14 +243,14 @@ export class TelegramAdapter {
     const secretToken = this.configService.get<string>('TELEGRAM_WEBHOOK_SECRET');
 
     try {
-      await axios.post(`${this.apiUrl}/setWebhook`, {
+      await this.axiosInstance.post(`${this.apiUrl}/setWebhook`, {
         url: webhookUrl,
         secret_token: secretToken,
         allowed_updates: ['message', 'callback_query'],
       });
       this.logger.log(`Telegram webhook set to: ${webhookUrl}`);
-    } catch (error) {
-      this.logger.error('Failed to set Telegram webhook:', error);
+    } catch (error: any) {
+      this.logger.error(`Failed to set Telegram webhook: ${error.message}`);
       throw error;
     }
   }
