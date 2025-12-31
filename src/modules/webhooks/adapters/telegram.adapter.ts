@@ -84,14 +84,49 @@ export class TelegramAdapter {
     this.botToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN', '');
     this.apiUrl = `https://api.telegram.org/bot${this.botToken}`;
     
-    // Create axios instance with IPv4 forced and timeout
+    // Create axios instance with retry and timeout settings
     this.axiosInstance = axios.create({
-      timeout: 30000, // 30 second timeout
+      timeout: 60000, // 60 second timeout
       httpsAgent: new https.Agent({
         family: 4, // Force IPv4
         keepAlive: true,
+        timeout: 60000,
       }),
+      // Retry configuration via interceptor will be added
     });
+
+    // Add retry interceptor
+    this.axiosInstance.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        const config = error.config;
+        
+        // Initialize retry count
+        config.__retryCount = config.__retryCount || 0;
+        
+        // Max 3 retries
+        if (config.__retryCount >= 3) {
+          return Promise.reject(error);
+        }
+        
+        // Only retry on network errors or 5xx errors
+        const shouldRetry = 
+          !error.response || 
+          (error.response.status >= 500 && error.response.status <= 599);
+        
+        if (!shouldRetry) {
+          return Promise.reject(error);
+        }
+        
+        config.__retryCount += 1;
+        this.logger.warn(`Retrying Telegram API request (attempt ${config.__retryCount}/3)...`);
+        
+        // Exponential backoff
+        await new Promise(resolve => setTimeout(resolve, 1000 * config.__retryCount));
+        
+        return this.axiosInstance(config);
+      }
+    );
   }
 
   normalizeUpdate(update: TelegramUpdate): NormalizedMessage | null {

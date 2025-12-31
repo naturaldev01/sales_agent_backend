@@ -36,6 +36,7 @@ export class TelegramPollingService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     const isEnabled = this.configService.get<string>('ENABLE_TELEGRAM') === 'true';
     const usePolling = this.configService.get<string>('TELEGRAM_USE_POLLING') === 'true';
+    const webhookUrl = this.configService.get<string>('TELEGRAM_WEBHOOK_URL');
 
     if (!isEnabled) {
       this.logger.log('Telegram is disabled');
@@ -51,8 +52,39 @@ export class TelegramPollingService implements OnModuleInit, OnModuleDestroy {
       // Delete any existing webhook first
       await this.deleteWebhook();
       this.startPolling();
+    } else if (webhookUrl) {
+      // Webhook mode - set the webhook URL
+      await this.setWebhook(webhookUrl);
     } else {
-      this.logger.log('Telegram polling disabled, using webhook mode');
+      this.logger.log('Telegram polling disabled, no webhook URL configured');
+    }
+  }
+
+  private async setWebhook(webhookUrl: string): Promise<void> {
+    const secretToken = this.configService.get<string>('TELEGRAM_WEBHOOK_SECRET');
+    
+    try {
+      this.logger.log(`Setting Telegram webhook to: ${webhookUrl}`);
+      
+      const payload: Record<string, unknown> = {
+        url: webhookUrl,
+        allowed_updates: ['message', 'callback_query'],
+      };
+      
+      if (secretToken) {
+        payload.secret_token = secretToken;
+      }
+      
+      const response = await this.axiosInstance.post(`${this.apiUrl}/setWebhook`, payload);
+      
+      if (response.data.ok) {
+        this.logger.log(`✅ Telegram webhook set successfully to: ${webhookUrl}`);
+      } else {
+        this.logger.error(`Failed to set webhook: ${JSON.stringify(response.data)}`);
+      }
+    } catch (error: any) {
+      this.logger.error(`Failed to set Telegram webhook: ${error.message}`);
+      // Don't throw - webhook might already be set correctly
     }
   }
 
