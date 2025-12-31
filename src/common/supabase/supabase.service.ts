@@ -276,10 +276,24 @@ export class SupabaseService implements OnModuleInit {
     return data;
   }
 
-  async getConversationMessages(conversationId: string, limit = 20): Promise<Message[]> {
+  async getConversationMessages(conversationId: string, limit = 20): Promise<(Message & { ai_message_feedback?: { id: string; rating: string; comment: string | null; suggested_response: string | null; created_at: string | null; users?: { id: string; name: string; avatar_url: string | null } | null }[] | null })[]> {
     const { data, error } = await this.supabase
       .from('messages')
-      .select('*')
+      .select(`
+        *,
+        ai_message_feedback (
+          id,
+          rating,
+          comment,
+          suggested_response,
+          created_at,
+          users (
+            id,
+            name,
+            avatar_url
+          )
+        )
+      `)
       .eq('conversation_id', conversationId)
       .order('created_at', { ascending: false })
       .limit(limit);
