@@ -633,6 +633,8 @@ export type Database = {
           estimated_price_min: number | null
           estimated_price_max: number | null
           price_currency: string | null
+          sales_price_set_by: string | null
+          sales_price_set_at: string | null
         }
         Insert: {
           channel?: string
@@ -656,6 +658,8 @@ export type Database = {
           estimated_price_min?: number | null
           estimated_price_max?: number | null
           price_currency?: string | null
+          sales_price_set_by?: string | null
+          sales_price_set_at?: string | null
         }
         Update: {
           channel?: string
@@ -679,6 +683,8 @@ export type Database = {
           estimated_price_min?: number | null
           estimated_price_max?: number | null
           price_currency?: string | null
+          sales_price_set_by?: string | null
+          sales_price_set_at?: string | null
         }
         Relationships: []
       }

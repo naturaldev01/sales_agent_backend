@@ -14,7 +14,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiParam, ApiHeader, ApiBody } from '@nestjs/swagger';
-import { LeadsService, DoctorApprovalDto } from './leads.service';
+import { LeadsService, DoctorApprovalDto, SalesPriceDto } from './leads.service';
 import { AuthService } from '../auth/auth.service';
 
 // Roles allowed to approve leads
@@ -140,9 +140,6 @@ export class LeadsController {
       type: 'object',
       properties: {
         treatment_recommendations: { type: 'string', description: 'Required treatment recommendations' },
-        estimated_price_min: { type: 'number', description: 'Minimum estimated price' },
-        estimated_price_max: { type: 'number', description: 'Maximum estimated price' },
-        price_currency: { type: 'string', description: 'Currency (EUR, USD, etc.)' },
       },
       required: ['treatment_recommendations'],
     },
@@ -189,6 +186,43 @@ export class LeadsController {
   }
 
   // ==================== SALES ENDPOINTS ====================
+
+  @Post(':id/sales-price')
+  @ApiOperation({ summary: 'Sales agent submits price for a lead' })
+  @ApiParam({ name: 'id', type: String })
+  @ApiHeader({ name: 'Authorization', description: 'Bearer token', required: true })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        estimated_price_min: { type: 'number', description: 'Minimum price' },
+        estimated_price_max: { type: 'number', description: 'Maximum price' },
+        price_currency: { type: 'string', description: 'Currency (EUR, USD, GBP, TRY)' },
+      },
+      required: ['estimated_price_min', 'estimated_price_max', 'price_currency'],
+    },
+  })
+  async submitSalesPrice(
+    @Param('id', OptionalUUIDPipe) id: string,
+    @Headers('authorization') authHeader: string,
+    @Body() dto: SalesPriceDto,
+  ) {
+    // Validate token and get user
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Authorization token required');
+    }
+
+    const token = authHeader.substring(7);
+    const user = await this.authService.validateToken(token);
+
+    // Check if user has sales role
+    if (!SALES_ROLES.includes(user.role)) {
+      throw new ForbiddenException('Only sales agents and admins can submit prices');
+    }
+
+    this.logger.log(`Sales agent ${user.email} submitting price for lead ${id}`);
+    return this.leadsService.submitSalesPrice(id, user.id, dto);
+  }
 
   @Get('sales/ready')
   @ApiOperation({ summary: 'Get leads ready for sales (READY_FOR_SALES status)' })

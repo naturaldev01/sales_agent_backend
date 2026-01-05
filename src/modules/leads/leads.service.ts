@@ -19,9 +19,12 @@ export interface LeadWithProfile extends Lead {
 
 export interface DoctorApprovalDto {
   treatment_recommendations: string;
-  estimated_price_min?: number;
-  estimated_price_max?: number;
-  price_currency?: string;
+}
+
+export interface SalesPriceDto {
+  estimated_price_min: number;
+  estimated_price_max: number;
+  price_currency: string;
 }
 
 export interface DoctorComment {
@@ -208,24 +211,13 @@ export class LeadsService {
       throw new BadRequestException('Treatment recommendations are required');
     }
 
-    // Update lead with doctor approval
+    // Update lead with doctor approval (only treatment recommendations, no price)
     const updateData: Record<string, unknown> = {
       status: 'READY_FOR_SALES',
       doctor_approved_by: doctorId,
       doctor_approved_at: new Date().toISOString(),
       treatment_recommendations: dto.treatment_recommendations.trim(),
     };
-
-    // Optional price fields
-    if (dto.estimated_price_min !== undefined) {
-      updateData.estimated_price_min = dto.estimated_price_min;
-    }
-    if (dto.estimated_price_max !== undefined) {
-      updateData.estimated_price_max = dto.estimated_price_max;
-    }
-    if (dto.price_currency) {
-      updateData.price_currency = dto.price_currency;
-    }
 
     await this.supabase.updateLead(leadId, updateData);
 
@@ -289,6 +281,48 @@ export class LeadsService {
     }
 
     return data as LeadWithProfile[];
+  }
+
+  // ==================== SALES PRICE SUBMISSION ====================
+
+  /**
+   * Sales agent submits price for a lead
+   * Status remains READY_FOR_SALES until converted
+   */
+  async submitSalesPrice(
+    leadId: string,
+    salesAgentId: string,
+    dto: SalesPriceDto,
+  ): Promise<LeadWithProfile> {
+    const lead = await this.findById(leadId);
+
+    // Validate lead is in correct status
+    if (lead.status !== 'READY_FOR_SALES') {
+      throw new BadRequestException(
+        `Lead must be in READY_FOR_SALES status to submit price. Current status: ${lead.status}`,
+      );
+    }
+
+    // Validate price fields
+    if (dto.estimated_price_min <= 0 || dto.estimated_price_max <= 0) {
+      throw new BadRequestException('Price values must be greater than 0');
+    }
+    if (dto.estimated_price_min > dto.estimated_price_max) {
+      throw new BadRequestException('Minimum price cannot be greater than maximum price');
+    }
+
+    // Update lead with price information
+    await this.supabase.updateLead(leadId, {
+      estimated_price_min: dto.estimated_price_min,
+      estimated_price_max: dto.estimated_price_max,
+      price_currency: dto.price_currency,
+      sales_price_set_by: salesAgentId,
+      sales_price_set_at: new Date().toISOString(),
+    });
+
+    this.logger.log(`Sales price submitted for lead ${leadId} by agent ${salesAgentId}`);
+
+    return this.findById(leadId);
   }
 
   /**
