@@ -118,7 +118,7 @@ export class FollowupsService {
     decision: AiFollowupDecision,
   ): Promise<void> {
     await this.supabase.updateFollowup(followupId, {
-      ai_decision: decision,
+      ai_decision: decision as unknown as Record<string, unknown>,
       ai_confidence: decision.confidence,
     });
   }
