@@ -24,11 +24,19 @@ export class LeadsService {
     channel?: string;
     limit?: number;
     offset?: number;
+    allowedTreatments?: string[];
   } = {}): Promise<LeadWithProfile[]> {
     const leads = await this.supabase.getAllLeads(options.limit || 50);
 
     // Apply filters
     let filtered = leads as LeadWithProfile[];
+
+    // Doctor specialty filter - only show leads with allowed treatment categories
+    if (options.allowedTreatments && options.allowedTreatments.length > 0) {
+      filtered = filtered.filter((l) => 
+        l.treatment_category && options.allowedTreatments!.includes(l.treatment_category)
+      );
+    }
 
     if (options.status) {
       filtered = filtered.filter((l) => l.status === options.status);

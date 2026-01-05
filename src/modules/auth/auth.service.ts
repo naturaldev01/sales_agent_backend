@@ -17,6 +17,7 @@ export interface User {
   is_active: boolean;
   is_approved: boolean;
   created_at: string;
+  specialties?: string[] | null;
 }
 
 export interface AuthResponse {
@@ -188,7 +189,8 @@ export class AuthService {
           avatar_url,
           is_active,
           is_approved,
-          created_at
+          created_at,
+          specialties
         )
       `)
       .eq('token_hash', tokenHash)
@@ -267,7 +269,7 @@ export class AuthService {
   async getAllUsers(): Promise<User[]> {
     const { data, error } = await this.supabase.client
       .from('users')
-      .select('id, email, name, role, avatar_url, is_active, is_approved, created_at, approved_at')
+      .select('id, email, name, role, avatar_url, is_active, is_approved, created_at, approved_at, specialties')
       .order('created_at', { ascending: false });
 
     if (error) {
@@ -332,7 +334,7 @@ export class AuthService {
       .from('users')
       .update({ role })
       .eq('id', userId)
-      .select('id, email, name, role, avatar_url, is_active, is_approved, created_at')
+      .select('id, email, name, role, avatar_url, is_active, is_approved, created_at, specialties')
       .single();
 
     if (error) {
@@ -341,6 +343,42 @@ export class AuthService {
     }
 
     this.logger.log(`User ${userId} role updated to ${role}`);
+    return data as User;
+  }
+
+  async updateUserSpecialties(userId: string, specialties: string[]): Promise<User> {
+    const validSpecialties = [
+      'hair_transplant',
+      'dental',
+      'rhinoplasty',
+      'bbl',
+      'breast',
+      'liposuction',
+      'facelift',
+      'arm_lift',
+    ];
+
+    // Validate specialties
+    const invalidSpecialties = specialties.filter(s => !validSpecialties.includes(s));
+    if (invalidSpecialties.length > 0) {
+      throw new BadRequestException(
+        `Invalid specialties: ${invalidSpecialties.join(', ')}. Valid: ${validSpecialties.join(', ')}`
+      );
+    }
+
+    const { data, error } = await this.supabase.client
+      .from('users')
+      .update({ specialties })
+      .eq('id', userId)
+      .select('id, email, name, role, avatar_url, is_active, is_approved, created_at, specialties')
+      .single();
+
+    if (error) {
+      this.logger.error('Error updating user specialties:', error);
+      throw new BadRequestException('Failed to update user specialties');
+    }
+
+    this.logger.log(`User ${userId} specialties updated to: ${specialties.join(', ')}`);
     return data as User;
   }
 }

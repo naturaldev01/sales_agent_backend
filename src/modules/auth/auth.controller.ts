@@ -161,5 +161,18 @@ export class AuthController {
     await this.getAdminUser(authHeader);
     return this.authService.updateUserRole(userId, dto.role);
   }
+
+  @Patch('admin/users/:id/specialties')
+  @ApiOperation({ summary: 'Update doctor specialties (admin only)' })
+  @ApiParam({ name: 'id', type: String })
+  @ApiHeader({ name: 'Authorization', description: 'Bearer token' })
+  async updateUserSpecialties(
+    @Param('id', ParseUUIDPipe) userId: string,
+    @Body() dto: { specialties: string[] },
+    @Headers('authorization') authHeader: string,
+  ) {
+    await this.getAdminUser(authHeader);
+    return this.authService.updateUserSpecialties(userId, dto.specialties);
+  }
 }
 
