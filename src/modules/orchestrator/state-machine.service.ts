@@ -6,6 +6,7 @@ export type LeadStatus =
   | 'PHOTO_REQUESTED'
   | 'PHOTO_COLLECTING'
   | 'READY_FOR_DOCTOR'
+  | 'READY_FOR_SALES'  // New: Doctor approved, waiting for sales to create offer
   | 'WAITING_FOR_USER'
   | 'DORMANT'
   | 'HANDOFF_HUMAN'
@@ -20,7 +21,8 @@ export type LeadEvent =
   | 'FOLLOWUP_SENT'
   | 'MAX_FOLLOWUPS_REACHED'
   | 'HANDOFF_REQUESTED'
-  | 'DOCTOR_APPROVED'
+  | 'DOCTOR_APPROVED'      // Doctor approves -> READY_FOR_SALES
+  | 'SALES_OFFER_SENT'     // New: Sales sends offer -> CONVERTED
   | 'CONVERTED'
   | 'CLOSED_BY_USER'
   | 'CLOSED_BY_ADMIN';
@@ -131,28 +133,35 @@ export class StateMachineService {
       event: 'HANDOFF_REQUESTED',
     },
 
-    // Doctor approves
+    // Doctor approves -> Goes to sales
     {
       from: ['READY_FOR_DOCTOR'],
-      to: 'CONVERTED',
+      to: 'READY_FOR_SALES',
       event: 'DOCTOR_APPROVED',
     },
 
-    // Lead converts
+    // Sales sends offer -> Converted
     {
-      from: ['HANDOFF_HUMAN', 'READY_FOR_DOCTOR'],
+      from: ['READY_FOR_SALES'],
+      to: 'CONVERTED',
+      event: 'SALES_OFFER_SENT',
+    },
+
+    // Lead converts (from various states)
+    {
+      from: ['HANDOFF_HUMAN', 'READY_FOR_SALES'],
       to: 'CONVERTED',
       event: 'CONVERTED',
     },
 
     // Close from any state
     {
-      from: ['NEW', 'QUALIFYING', 'PHOTO_REQUESTED', 'PHOTO_COLLECTING', 'READY_FOR_DOCTOR', 'WAITING_FOR_USER', 'DORMANT', 'HANDOFF_HUMAN'],
+      from: ['NEW', 'QUALIFYING', 'PHOTO_REQUESTED', 'PHOTO_COLLECTING', 'READY_FOR_DOCTOR', 'READY_FOR_SALES', 'WAITING_FOR_USER', 'DORMANT', 'HANDOFF_HUMAN'],
       to: 'CLOSED',
       event: 'CLOSED_BY_USER',
     },
     {
-      from: ['NEW', 'QUALIFYING', 'PHOTO_REQUESTED', 'PHOTO_COLLECTING', 'READY_FOR_DOCTOR', 'WAITING_FOR_USER', 'DORMANT', 'HANDOFF_HUMAN'],
+      from: ['NEW', 'QUALIFYING', 'PHOTO_REQUESTED', 'PHOTO_COLLECTING', 'READY_FOR_DOCTOR', 'READY_FOR_SALES', 'WAITING_FOR_USER', 'DORMANT', 'HANDOFF_HUMAN'],
       to: 'CLOSED',
       event: 'CLOSED_BY_ADMIN',
     },
@@ -241,7 +250,7 @@ export class StateMachineService {
 
     const allStates: LeadStatus[] = [
       'NEW', 'QUALIFYING', 'PHOTO_REQUESTED', 'PHOTO_COLLECTING',
-      'READY_FOR_DOCTOR', 'WAITING_FOR_USER', 'DORMANT', 
+      'READY_FOR_DOCTOR', 'READY_FOR_SALES', 'WAITING_FOR_USER', 'DORMANT', 
       'HANDOFF_HUMAN', 'CONVERTED', 'CLOSED'
     ];
 

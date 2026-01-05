@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import {
   SupabaseService,
   Lead,
@@ -9,6 +9,31 @@ import {
 
 export interface LeadWithProfile extends Lead {
   lead_profile?: LeadProfile | null;
+  doctor_approved_by?: string | null;
+  doctor_approved_at?: string | null;
+  treatment_recommendations?: string | null;
+  estimated_price_min?: number | null;
+  estimated_price_max?: number | null;
+  price_currency?: string | null;
+}
+
+export interface DoctorApprovalDto {
+  treatment_recommendations: string;
+  estimated_price_min?: number;
+  estimated_price_max?: number;
+  price_currency?: string;
+}
+
+export interface DoctorComment {
+  id: string;
+  comment: string;
+  comment_type: string;
+  is_pinned: boolean;
+  created_at: string;
+  users?: {
+    name: string;
+    role: string;
+  };
 }
 
 @Injectable()
@@ -155,5 +180,196 @@ export class LeadsService {
     }
 
     return stats;
+  }
+
+  // ==================== DOCTOR APPROVAL ====================
+
+  /**
+   * Doctor approves a lead and sends it to sales department
+   * Status: READY_FOR_DOCTOR -> READY_FOR_SALES
+   */
+  async doctorApprove(
+    leadId: string,
+    doctorId: string,
+    dto: DoctorApprovalDto,
+  ): Promise<LeadWithProfile> {
+    // Get the lead first
+    const lead = await this.findById(leadId);
+
+    // Validate lead is in correct status
+    if (lead.status !== 'READY_FOR_DOCTOR') {
+      throw new BadRequestException(
+        `Lead must be in READY_FOR_DOCTOR status to approve. Current status: ${lead.status}`,
+      );
+    }
+
+    // Validate treatment recommendations
+    if (!dto.treatment_recommendations || dto.treatment_recommendations.trim().length === 0) {
+      throw new BadRequestException('Treatment recommendations are required');
+    }
+
+    // Update lead with doctor approval
+    const updateData: Record<string, unknown> = {
+      status: 'READY_FOR_SALES',
+      doctor_approved_by: doctorId,
+      doctor_approved_at: new Date().toISOString(),
+      treatment_recommendations: dto.treatment_recommendations.trim(),
+    };
+
+    // Optional price fields
+    if (dto.estimated_price_min !== undefined) {
+      updateData.estimated_price_min = dto.estimated_price_min;
+    }
+    if (dto.estimated_price_max !== undefined) {
+      updateData.estimated_price_max = dto.estimated_price_max;
+    }
+    if (dto.price_currency) {
+      updateData.price_currency = dto.price_currency;
+    }
+
+    await this.supabase.updateLead(leadId, updateData);
+
+    // Create sales notification
+    await this.createSalesNotification(leadId, lead);
+
+    this.logger.log(`Lead ${leadId} approved by doctor ${doctorId} and sent to sales`);
+
+    return this.findById(leadId);
+  }
+
+  /**
+   * Create a notification for sales team
+   */
+  private async createSalesNotification(leadId: string, lead: LeadWithProfile): Promise<void> {
+    try {
+      const patientName = lead.lead_profile?.name || 'Unknown Patient';
+      const treatment = lead.treatment_category || 'Unknown Treatment';
+
+      const { error } = await this.supabase.client
+        .from('sales_notifications')
+        .insert({
+          lead_id: leadId,
+          notification_type: 'new_lead',
+          title: `New Lead Ready: ${patientName}`,
+          message: `A new ${treatment} lead has been approved by the doctor and is ready for pricing.`,
+          metadata: {
+            treatment_category: lead.treatment_category,
+            patient_name: patientName,
+            country: lead.country,
+            language: lead.language,
+          },
+        });
+
+      if (error) {
+        this.logger.error('Failed to create sales notification:', error);
+        // Don't throw - the approval was successful
+      }
+    } catch (err) {
+      this.logger.error('Error creating sales notification:', err);
+    }
+  }
+
+  /**
+   * Get leads ready for sales (READY_FOR_SALES status)
+   */
+  async getLeadsForSales(limit = 50): Promise<LeadWithProfile[]> {
+    const { data, error } = await this.supabase.client
+      .from('leads')
+      .select(`
+        *,
+        lead_profile (*)
+      `)
+      .eq('status', 'READY_FOR_SALES')
+      .order('doctor_approved_at', { ascending: false })
+      .limit(limit);
+
+    if (error) {
+      this.logger.error('Error fetching leads for sales:', error);
+      throw error;
+    }
+
+    return data as LeadWithProfile[];
+  }
+
+  /**
+   * Get doctor recommendations (comments) for a lead
+   */
+  async getDoctorRecommendations(leadId: string): Promise<DoctorComment[]> {
+    const { data, error } = await this.supabase.client
+      .from('doctor_comments')
+      .select(`
+        id,
+        comment,
+        comment_type,
+        is_pinned,
+        created_at,
+        visible_to_sales,
+        users (
+          name,
+          role
+        )
+      `)
+      .eq('lead_id', leadId)
+      .eq('visible_to_sales', true)
+      .in('comment_type', ['recommendation', 'diagnosis', 'note'])
+      .order('is_pinned', { ascending: false })
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      this.logger.error('Error fetching doctor recommendations:', error);
+      throw error;
+    }
+
+    return data as DoctorComment[];
+  }
+
+  /**
+   * Get sales notifications
+   */
+  async getSalesNotifications(onlyUnread = false, limit = 50): Promise<unknown[]> {
+    let query = this.supabase.client
+      .from('sales_notifications')
+      .select(`
+        *,
+        leads (
+          id,
+          treatment_category,
+          lead_profile (name)
+        )
+      `)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (onlyUnread) {
+      query = query.eq('is_read', false);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      this.logger.error('Error fetching sales notifications:', error);
+      throw error;
+    }
+
+    return data || [];
+  }
+
+  /**
+   * Mark sales notification as read
+   */
+  async markNotificationRead(notificationId: string, userId: string): Promise<void> {
+    const { error } = await this.supabase.client
+      .from('sales_notifications')
+      .update({
+        is_read: true,
+        read_by: userId,
+        read_at: new Date().toISOString(),
+      })
+      .eq('id', notificationId);
+
+    if (error) {
+      this.logger.error('Error marking notification as read:', error);
+      throw error;
+    }
   }
 }

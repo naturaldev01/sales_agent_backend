@@ -627,6 +627,12 @@ export type Database = {
           timezone: string | null
           treatment_category: string | null
           updated_at: string | null
+          doctor_approved_by: string | null
+          doctor_approved_at: string | null
+          treatment_recommendations: string | null
+          estimated_price_min: number | null
+          estimated_price_max: number | null
+          price_currency: string | null
         }
         Insert: {
           channel?: string
@@ -644,6 +650,12 @@ export type Database = {
           timezone?: string | null
           treatment_category?: string | null
           updated_at?: string | null
+          doctor_approved_by?: string | null
+          doctor_approved_at?: string | null
+          treatment_recommendations?: string | null
+          estimated_price_min?: number | null
+          estimated_price_max?: number | null
+          price_currency?: string | null
         }
         Update: {
           channel?: string
@@ -661,6 +673,12 @@ export type Database = {
           timezone?: string | null
           treatment_category?: string | null
           updated_at?: string | null
+          doctor_approved_by?: string | null
+          doctor_approved_at?: string | null
+          treatment_recommendations?: string | null
+          estimated_price_min?: number | null
+          estimated_price_max?: number | null
+          price_currency?: string | null
         }
         Relationships: []
       }

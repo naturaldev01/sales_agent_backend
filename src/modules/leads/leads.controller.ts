@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Post,
   Param,
   Query,
   Patch,
@@ -10,10 +11,15 @@ import {
   BadRequestException,
   Headers,
   UnauthorizedException,
+  ForbiddenException,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiQuery, ApiParam, ApiHeader } from '@nestjs/swagger';
-import { LeadsService } from './leads.service';
+import { ApiTags, ApiOperation, ApiQuery, ApiParam, ApiHeader, ApiBody } from '@nestjs/swagger';
+import { LeadsService, DoctorApprovalDto } from './leads.service';
 import { AuthService } from '../auth/auth.service';
+
+// Roles allowed to approve leads
+const DOCTOR_ROLES = ['doctor', 'admin'];
+const SALES_ROLES = ['sales_agent', 'admin'];
 
 // Custom UUID pipe that handles "null" string gracefully
 const OptionalUUIDPipe = new ParseUUIDPipe({
@@ -121,6 +127,143 @@ export class LeadsController {
     @Body('score') score: number,
   ) {
     return this.leadsService.updateDesireScore(id, score);
+  }
+
+  // ==================== DOCTOR APPROVAL ====================
+
+  @Post(':id/doctor-approve')
+  @ApiOperation({ summary: 'Doctor approves lead and sends to sales department' })
+  @ApiParam({ name: 'id', type: String })
+  @ApiHeader({ name: 'Authorization', description: 'Bearer token', required: true })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        treatment_recommendations: { type: 'string', description: 'Required treatment recommendations' },
+        estimated_price_min: { type: 'number', description: 'Minimum estimated price' },
+        estimated_price_max: { type: 'number', description: 'Maximum estimated price' },
+        price_currency: { type: 'string', description: 'Currency (EUR, USD, etc.)' },
+      },
+      required: ['treatment_recommendations'],
+    },
+  })
+  async doctorApprove(
+    @Param('id', OptionalUUIDPipe) id: string,
+    @Headers('authorization') authHeader: string,
+    @Body() dto: DoctorApprovalDto,
+  ) {
+    // Validate token and get user
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Authorization token required');
+    }
+
+    const token = authHeader.substring(7);
+    const user = await this.authService.validateToken(token);
+
+    // Check if user has doctor role
+    if (!DOCTOR_ROLES.includes(user.role)) {
+      throw new ForbiddenException('Only doctors and admins can approve leads');
+    }
+
+    this.logger.log(`Doctor ${user.email} approving lead ${id}`);
+    return this.leadsService.doctorApprove(id, user.id, dto);
+  }
+
+  @Get(':id/doctor-recommendations')
+  @ApiOperation({ summary: 'Get doctor recommendations for a lead' })
+  @ApiParam({ name: 'id', type: String })
+  @ApiHeader({ name: 'Authorization', description: 'Bearer token', required: true })
+  async getDoctorRecommendations(
+    @Param('id', OptionalUUIDPipe) id: string,
+    @Headers('authorization') authHeader: string,
+  ) {
+    // Validate token
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Authorization token required');
+    }
+
+    const token = authHeader.substring(7);
+    await this.authService.validateToken(token);
+
+    return this.leadsService.getDoctorRecommendations(id);
+  }
+
+  // ==================== SALES ENDPOINTS ====================
+
+  @Get('sales/ready')
+  @ApiOperation({ summary: 'Get leads ready for sales (READY_FOR_SALES status)' })
+  @ApiHeader({ name: 'Authorization', description: 'Bearer token', required: true })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  async getLeadsForSales(
+    @Headers('authorization') authHeader: string,
+    @Query('limit') limit?: number,
+  ) {
+    // Validate token and check role
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Authorization token required');
+    }
+
+    const token = authHeader.substring(7);
+    const user = await this.authService.validateToken(token);
+
+    // Sales agents and admins can access
+    if (!SALES_ROLES.includes(user.role) && !DOCTOR_ROLES.includes(user.role)) {
+      throw new ForbiddenException('Only sales agents and admins can access this endpoint');
+    }
+
+    return this.leadsService.getLeadsForSales(limit ? parseInt(String(limit), 10) : 50);
+  }
+
+  @Get('sales/notifications')
+  @ApiOperation({ summary: 'Get sales notifications' })
+  @ApiHeader({ name: 'Authorization', description: 'Bearer token', required: true })
+  @ApiQuery({ name: 'unread', required: false, type: Boolean })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  async getSalesNotifications(
+    @Headers('authorization') authHeader: string,
+    @Query('unread') unread?: string,
+    @Query('limit') limit?: number,
+  ) {
+    // Validate token and check role
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Authorization token required');
+    }
+
+    const token = authHeader.substring(7);
+    const user = await this.authService.validateToken(token);
+
+    if (!SALES_ROLES.includes(user.role)) {
+      throw new ForbiddenException('Only sales agents and admins can access notifications');
+    }
+
+    return this.leadsService.getSalesNotifications(
+      unread === 'true',
+      limit ? parseInt(String(limit), 10) : 50,
+    );
+  }
+
+  @Patch('sales/notifications/:notificationId/read')
+  @ApiOperation({ summary: 'Mark notification as read' })
+  @ApiParam({ name: 'notificationId', type: String })
+  @ApiHeader({ name: 'Authorization', description: 'Bearer token', required: true })
+  async markNotificationRead(
+    @Param('notificationId', OptionalUUIDPipe) notificationId: string,
+    @Headers('authorization') authHeader: string,
+  ) {
+    // Validate token
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedException('Authorization token required');
+    }
+
+    const token = authHeader.substring(7);
+    const user = await this.authService.validateToken(token);
+
+    if (!SALES_ROLES.includes(user.role)) {
+      throw new ForbiddenException('Only sales agents can mark notifications as read');
+    }
+
+    await this.leadsService.markNotificationRead(notificationId, user.id);
+    return { success: true };
   }
 }
 
