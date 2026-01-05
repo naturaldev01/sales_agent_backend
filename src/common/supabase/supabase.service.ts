@@ -509,24 +509,24 @@ export class SupabaseService implements OnModuleInit {
     response_received: boolean;
     response_at: string;
     message_id: string;
+    scheduled_at: string;
+    ai_decision: Record<string, unknown>;
+    ai_confidence: number;
   }>): Promise<Followup> {
-    const updateData: FollowupUpdate = {
-      status: data.status,
-      sent_at: data.sent_at,
-      response_received: data.response_received,
-      response_at: data.response_at,
-      message_id: data.message_id,
-    };
+    const updateData: Record<string, unknown> = {};
     
-    Object.keys(updateData).forEach(key => {
-      if (updateData[key as keyof FollowupUpdate] === undefined) {
-        delete updateData[key as keyof FollowupUpdate];
-      }
-    });
+    if (data.status !== undefined) updateData.status = data.status;
+    if (data.sent_at !== undefined) updateData.sent_at = data.sent_at;
+    if (data.response_received !== undefined) updateData.response_received = data.response_received;
+    if (data.response_at !== undefined) updateData.response_at = data.response_at;
+    if (data.message_id !== undefined) updateData.message_id = data.message_id;
+    if (data.scheduled_at !== undefined) updateData.scheduled_at = data.scheduled_at;
+    if (data.ai_decision !== undefined) updateData.ai_decision = data.ai_decision;
+    if (data.ai_confidence !== undefined) updateData.ai_confidence = data.ai_confidence;
     
     const { data: followup, error } = await this.supabase
       .from('followups')
-      .update(updateData)
+      .update(updateData as FollowupUpdate)
       .eq('id', id)
       .select()
       .single();
@@ -543,6 +543,74 @@ export class SupabaseService implements OnModuleInit {
       .eq('status', 'pending');
 
     if (error) throw error;
+  }
+
+  /**
+   * Get count of follow-ups sent without user response
+   */
+  async getUnansweredFollowupCount(leadId: string): Promise<number> {
+    const { count, error } = await this.supabase
+      .from('followups')
+      .select('*', { count: 'exact', head: true })
+      .eq('lead_id', leadId)
+      .eq('status', 'sent')
+      .eq('response_received', false);
+
+    if (error) throw error;
+    return count || 0;
+  }
+
+  /**
+   * Get the timestamp of the last user response in a conversation
+   */
+  async getLastUserResponseAt(conversationId: string): Promise<string | null> {
+    const { data, error } = await this.supabase
+      .from('messages')
+      .select('created_at')
+      .eq('conversation_id', conversationId)
+      .eq('direction', 'in')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return data?.created_at || null;
+  }
+
+  /**
+   * Check if a lead has any photos
+   */
+  async hasPhotos(leadId: string): Promise<boolean> {
+    const { count, error } = await this.supabase
+      .from('photo_assets')
+      .select('*', { count: 'exact', head: true })
+      .eq('lead_id', leadId);
+
+    if (error) throw error;
+    return (count || 0) > 0;
+  }
+
+  /**
+   * Get pending followups with full lead data including profile
+   */
+  async getPendingFollowupsWithProfile(): Promise<(Followup & { 
+    leads: (Lead & { lead_profile: LeadProfile | null }) | null; 
+    conversations: Conversation | null 
+  })[]> {
+    const now = new Date().toISOString();
+    const { data, error } = await this.supabase
+      .from('followups')
+      .select('*, leads(*, lead_profile(*)), conversations(*)')
+      .eq('status', 'pending')
+      .lte('scheduled_at', now)
+      .order('scheduled_at', { ascending: true })
+      .limit(100);
+
+    if (error) throw error;
+    return (data || []) as (Followup & { 
+      leads: (Lead & { lead_profile: LeadProfile | null }) | null; 
+      conversations: Conversation | null 
+    })[];
   }
 
   // ==================== HANDOFFS ====================

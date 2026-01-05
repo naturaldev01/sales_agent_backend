@@ -8,6 +8,18 @@ interface FollowupSettings {
   working_hours_start: string;
   working_hours_end: string;
   cooldown_days: number;
+  use_ai_timing: boolean;  // New: Enable AI-driven follow-up timing
+}
+
+export interface AiFollowupDecision {
+  shouldFollowup: boolean;
+  followupStrategy: 'immediate' | 'wait' | 'give_up' | 'escalate';
+  waitHours: number | null;
+  followupTone: 'gentle_reminder' | 'value_add' | 'urgency' | 'final_goodbye' | null;
+  suggestedMessage: string | null;
+  reasoning: string;
+  confidence: number;
+  escalationReason: string | null;
 }
 
 @Injectable()
@@ -27,6 +39,7 @@ export class FollowupsService {
       working_hours_start: '09:00',
       working_hours_end: '19:00',
       cooldown_days: 7,
+      use_ai_timing: true,  // AI-driven timing enabled by default
     };
     
     if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
@@ -34,6 +47,94 @@ export class FollowupsService {
     }
     
     return defaultSettings;
+  }
+
+  /**
+   * Schedule an AI analysis checkpoint instead of a fixed follow-up.
+   * The AI will decide at that point whether to send, wait, or give up.
+   */
+  async scheduleAiAnalysisCheckpoint(
+    leadId: string, 
+    conversationId: string,
+    checkInHours: number = 4,
+  ): Promise<void> {
+    const settings = await this.getSettings();
+    const scheduledAt = new Date();
+    scheduledAt.setHours(scheduledAt.getHours() + checkInHours);
+
+    // Adjust for working hours
+    const adjustedTime = this.adjustForWorkingHours(
+      scheduledAt,
+      settings.working_hours_start,
+      settings.working_hours_end,
+    );
+
+    await this.supabase.createFollowup({
+      lead_id: leadId,
+      conversation_id: conversationId,
+      followup_type: 'ai_analysis',  // New type: AI will decide what to do
+      attempt_number: 0,  // Not relevant for AI-driven
+      scheduled_at: adjustedTime.toISOString(),
+    });
+
+    this.logger.debug(
+      `AI analysis checkpoint scheduled for ${adjustedTime.toISOString()}`,
+    );
+  }
+
+  /**
+   * Reschedule a follow-up based on AI's wait_hours decision
+   */
+  async rescheduleFollowup(
+    followupId: string, 
+    waitHours: number,
+  ): Promise<void> {
+    const settings = await this.getSettings();
+    const scheduledAt = new Date();
+    scheduledAt.setHours(scheduledAt.getHours() + waitHours);
+
+    // Adjust for working hours
+    const adjustedTime = this.adjustForWorkingHours(
+      scheduledAt,
+      settings.working_hours_start,
+      settings.working_hours_end,
+    );
+
+    await this.supabase.updateFollowup(followupId, {
+      scheduled_at: adjustedTime.toISOString(),
+      status: 'pending',
+    });
+
+    this.logger.debug(
+      `Follow-up ${followupId} rescheduled to ${adjustedTime.toISOString()}`,
+    );
+  }
+
+  /**
+   * Save AI's decision for analytics and learning
+   */
+  async saveAiDecision(
+    followupId: string,
+    decision: AiFollowupDecision,
+  ): Promise<void> {
+    await this.supabase.updateFollowup(followupId, {
+      ai_decision: decision,
+      ai_confidence: decision.confidence,
+    });
+  }
+
+  /**
+   * Get the count of unanswered follow-ups for a lead
+   */
+  async getUnansweredFollowupCount(leadId: string): Promise<number> {
+    return this.supabase.getUnansweredFollowupCount(leadId);
+  }
+
+  /**
+   * Get the last user response timestamp for a conversation
+   */
+  async getLastUserResponseAt(conversationId: string): Promise<string | null> {
+    return this.supabase.getLastUserResponseAt(conversationId);
   }
 
   async scheduleFollowups(leadId: string, conversationId: string): Promise<void> {
