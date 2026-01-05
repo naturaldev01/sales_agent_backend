@@ -9,12 +9,6 @@ import {
 
 export interface LeadWithProfile extends Lead {
   lead_profile?: LeadProfile | null;
-  doctor_approved_by?: string | null;
-  doctor_approved_at?: string | null;
-  treatment_recommendations?: string | null;
-  estimated_price_min?: number | null;
-  estimated_price_max?: number | null;
-  price_currency?: string | null;
 }
 
 export interface DoctorApprovalDto {
@@ -337,14 +331,12 @@ export class LeadsService {
         comment_type,
         is_pinned,
         created_at,
-        visible_to_sales,
         users (
           name,
           role
         )
       `)
       .eq('lead_id', leadId)
-      .eq('visible_to_sales', true)
       .in('comment_type', ['recommendation', 'diagnosis', 'note'])
       .order('is_pinned', { ascending: false })
       .order('created_at', { ascending: false });

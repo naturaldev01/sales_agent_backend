@@ -114,6 +114,16 @@ export class SupabaseService implements OnModuleInit {
     treatment_category: string;
     desire_score: number;
     metadata: Record<string, unknown>;
+    // Doctor approval fields
+    doctor_approved_by: string;
+    doctor_approved_at: string;
+    treatment_recommendations: string;
+    // Sales price fields
+    estimated_price_min: number;
+    estimated_price_max: number;
+    price_currency: string;
+    sales_price_set_by: string;
+    sales_price_set_at: string;
   }>): Promise<Lead> {
     const updateData: LeadUpdate = {
       status: data.status,
@@ -122,6 +132,16 @@ export class SupabaseService implements OnModuleInit {
       treatment_category: data.treatment_category,
       desire_score: data.desire_score,
       metadata: data.metadata as Json,
+      // Doctor approval fields
+      doctor_approved_by: data.doctor_approved_by,
+      doctor_approved_at: data.doctor_approved_at,
+      treatment_recommendations: data.treatment_recommendations,
+      // Sales price fields
+      estimated_price_min: data.estimated_price_min,
+      estimated_price_max: data.estimated_price_max,
+      price_currency: data.price_currency,
+      sales_price_set_by: data.sales_price_set_by,
+      sales_price_set_at: data.sales_price_set_at,
     };
     
     // Remove undefined values

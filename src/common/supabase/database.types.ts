@@ -263,6 +263,7 @@ export type Database = {
           lead_id: string
           updated_at: string | null
           user_id: string
+          visible_to_sales: boolean | null
         }
         Insert: {
           comment: string
@@ -273,6 +274,7 @@ export type Database = {
           lead_id: string
           updated_at?: string | null
           user_id: string
+          visible_to_sales?: boolean | null
         }
         Update: {
           comment?: string
@@ -283,6 +285,7 @@ export type Database = {
           lead_id?: string
           updated_at?: string | null
           user_id?: string
+          visible_to_sales?: boolean | null
         }
         Relationships: [
           {
@@ -956,6 +959,63 @@ export type Database = {
           updated_at?: string | null
         }
         Relationships: []
+      }
+      sales_notifications: {
+        Row: {
+          id: string
+          lead_id: string
+          notification_type: string
+          title: string
+          message: string | null
+          metadata: Json | null
+          is_read: boolean
+          read_by: string | null
+          read_at: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          lead_id: string
+          notification_type: string
+          title: string
+          message?: string | null
+          metadata?: Json | null
+          is_read?: boolean
+          read_by?: string | null
+          read_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          lead_id?: string
+          notification_type?: string
+          title?: string
+          message?: string | null
+          metadata?: Json | null
+          is_read?: boolean
+          read_by?: string | null
+          read_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sales_notifications_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "sales_notifications_read_by_fkey"
+            columns: ["read_by"]
+            isOneToOne: false
+            referencedRelation: "users"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       users: {
         Row: {
