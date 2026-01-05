@@ -297,11 +297,16 @@ export class OrchestratorService {
 
       // Save and send the reply
       if (data.replyDraft) {
+        // Split message into parts for human-like conversation
+        const messageParts = this.splitMessageIntoParts(data.replyDraft);
+        const fullMessageContent = messageParts.join('\n\n'); // Store full message in DB for history
+        
+        // Save the complete message to database (joined for readability in history)
         const replyMessage = await this.supabase.createMessage({
           conversation_id: data.conversationId,
           lead_id: data.leadId,
           direction: 'out',
-          content: data.replyDraft,
+          content: fullMessageContent,
           sender_type: 'ai',
           ai_run_id: data.aiRunId,
         });
@@ -320,14 +325,23 @@ export class OrchestratorService {
           );
         }
 
-        // Queue the message to be sent via channel
-        await this.queueService.addChannelSendJob({
-          channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
-          channelUserId: lead.channel_user_id!,
-          content: data.replyDraft,
-        });
+        // Queue each message part with delay for human-like delivery
+        // Delay between messages: 1.5 seconds (1500ms) per message
+        const MESSAGE_DELAY_MS = 1500;
+        
+        for (let i = 0; i < messageParts.length; i++) {
+          const part = messageParts[i];
+          const delay = i * MESSAGE_DELAY_MS; // First message: 0ms, second: 1500ms, third: 3000ms, etc.
+          
+          await this.queueService.addChannelSendJob({
+            channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+            channelUserId: lead.channel_user_id!,
+            content: part,
+            delay: delay,
+          });
+        }
 
-        this.logger.log(`Reply queued for sending: ${replyMessage.id}`);
+        this.logger.log(`${messageParts.length} message part(s) queued for sending: ${replyMessage.id}`);
       }
 
       // Schedule follow-up if needed
@@ -432,6 +446,26 @@ export class OrchestratorService {
     };
 
     return messages[language] || messages.en;
+  }
+
+  /**
+   * Split a message into multiple parts for human-like conversation.
+   * Messages are split by the "|||" delimiter.
+   * This makes conversations feel more natural as humans typically
+   * send multiple short messages instead of one long one.
+   */
+  private splitMessageIntoParts(message: string): string[] {
+    // Split by ||| delimiter
+    const parts = message.split('|||')
+      .map(part => part.trim())
+      .filter(part => part.length > 0);
+    
+    // If no delimiter found or only one part, return as single message
+    if (parts.length <= 1) {
+      return [message.trim()];
+    }
+    
+    return parts;
   }
 
   /**

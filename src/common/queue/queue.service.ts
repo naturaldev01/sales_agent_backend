@@ -27,6 +27,7 @@ export interface ChannelSendPayload {
   content: string;
   mediaUrl?: string;
   mediaType?: string;
+  delay?: number; // milliseconds to wait before sending (for human-like message splitting)
 }
 
 @Injectable()
@@ -160,8 +161,10 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
   // ==================== CHANNEL SEND QUEUE ====================
 
   async addChannelSendJob(payload: ChannelSendPayload): Promise<Job<ChannelSendPayload>> {
-    const job = await this.channelQueue.add('send', payload);
-    this.logger.debug(`Channel send job added: ${job.id} - ${payload.channel}`);
+    const job = await this.channelQueue.add('send', payload, {
+      delay: payload.delay || 0, // Support delayed sending for human-like message splitting
+    });
+    this.logger.debug(`Channel send job added: ${job.id} - ${payload.channel}${payload.delay ? ` (delayed ${payload.delay}ms)` : ''}`);
     return job;
   }
 

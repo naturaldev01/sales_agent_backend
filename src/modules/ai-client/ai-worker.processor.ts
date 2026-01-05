@@ -263,36 +263,51 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
 
     // Save and send the reply
     if (data.replyDraft && !data.shouldHandoff) {
+      // Split message into parts for human-like conversation
+      const messageParts = this.splitMessageIntoParts(data.replyDraft);
+      const fullMessageContent = messageParts.join('\n\n'); // Store full message in DB for history
+      
       await this.supabase.createMessage({
         conversation_id: data.conversationId,
         lead_id: data.leadId,
         direction: 'out',
-        content: data.replyDraft,
+        content: fullMessageContent,
         sender_type: 'ai',
         ai_run_id: data.aiRunId,
       });
 
-      // Send message via the appropriate channel
+      // Send message parts via the appropriate channel with delays
       if (lead.channel_user_id) {
-        try {
-          if (lead.channel === 'telegram') {
-            await this.telegramAdapter.sendMessage({
-              channel: 'telegram',
-              channelUserId: lead.channel_user_id,
-              content: data.replyDraft,
-            });
-            this.logger.log(`📤 Telegram reply sent to ${lead.channel_user_id}`);
-          } else if (lead.channel === 'whatsapp') {
-            await this.whatsappAdapter.sendMessage({
-              channel: 'whatsapp',
-              channelUserId: lead.channel_user_id,
-              content: data.replyDraft,
-            });
-            this.logger.log(`📤 WhatsApp reply sent to ${lead.channel_user_id}`);
+        const MESSAGE_DELAY_MS = 1500; // 1.5 seconds between messages
+        
+        for (let i = 0; i < messageParts.length; i++) {
+          const part = messageParts[i];
+          
+          // Wait before sending (except for first message)
+          if (i > 0) {
+            await this.delay(MESSAGE_DELAY_MS);
           }
-        } catch (sendError) {
-          this.logger.error(`Failed to send reply via ${lead.channel}:`, sendError);
+          
+          try {
+            if (lead.channel === 'telegram') {
+              await this.telegramAdapter.sendMessage({
+                channel: 'telegram',
+                channelUserId: lead.channel_user_id,
+                content: part,
+              });
+            } else if (lead.channel === 'whatsapp') {
+              await this.whatsappAdapter.sendMessage({
+                channel: 'whatsapp',
+                channelUserId: lead.channel_user_id,
+                content: part,
+              });
+            }
+          } catch (sendError) {
+            this.logger.error(`Failed to send reply part ${i + 1} via ${lead.channel}:`, sendError);
+          }
         }
+        
+        this.logger.log(`📤 ${messageParts.length} message part(s) sent to ${lead.channel_user_id}`);
       }
 
       this.logger.log(`Reply saved for lead ${data.leadId}`);
@@ -350,6 +365,29 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
     } catch (error) {
       this.logger.error(`Error scheduling follow-up for lead ${leadId}:`, error);
     }
+  }
+
+  /**
+   * Split a message into multiple parts for human-like conversation.
+   * Messages are split by the "|||" delimiter.
+   */
+  private splitMessageIntoParts(message: string): string[] {
+    const parts = message.split('|||')
+      .map(part => part.trim())
+      .filter(part => part.length > 0);
+    
+    if (parts.length <= 1) {
+      return [message.trim()];
+    }
+    
+    return parts;
+  }
+
+  /**
+   * Helper to create a delay between messages
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   private mapExtractionToProfile(extraction: Record<string, unknown>): Record<string, unknown> {

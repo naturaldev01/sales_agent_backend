@@ -234,29 +234,44 @@ export class FollowupsScheduler {
     conversation: Conversation,
     message: string,
   ): Promise<void> {
+    // Split message into parts for human-like conversation
+    const messageParts = this.splitMessageIntoParts(message);
+    const fullMessageContent = messageParts.join('\n\n');
+    
     // Save the message to database
     const savedMessage: Message = await this.supabase.createMessage({
       conversation_id: conversation.id,
       lead_id: lead.id,
       direction: 'out',
-      content: message,
+      content: fullMessageContent,
       sender_type: 'ai',
     });
 
-    // Send via appropriate channel
+    // Send via appropriate channel with delays for human-like delivery
+    const MESSAGE_DELAY_MS = 1500; // 1.5 seconds between messages
+    
     try {
-      if (lead.channel === 'whatsapp' && lead.channel_user_id) {
-        await this.whatsappAdapter.sendMessage({
-          channel: 'whatsapp',
-          channelUserId: lead.channel_user_id,
-          content: message,
-        });
-      } else if (lead.channel === 'telegram' && lead.channel_user_id) {
-        await this.telegramAdapter.sendMessage({
-          channel: 'telegram',
-          channelUserId: lead.channel_user_id,
-          content: message,
-        });
+      for (let i = 0; i < messageParts.length; i++) {
+        const part = messageParts[i];
+        
+        // Wait before sending (except for first message)
+        if (i > 0) {
+          await this.delay(MESSAGE_DELAY_MS);
+        }
+        
+        if (lead.channel === 'whatsapp' && lead.channel_user_id) {
+          await this.whatsappAdapter.sendMessage({
+            channel: 'whatsapp',
+            channelUserId: lead.channel_user_id,
+            content: part,
+          });
+        } else if (lead.channel === 'telegram' && lead.channel_user_id) {
+          await this.telegramAdapter.sendMessage({
+            channel: 'telegram',
+            channelUserId: lead.channel_user_id,
+            content: part,
+          });
+        }
       }
     } catch (error) {
       this.logger.error(`Failed to send followup via ${lead.channel}:`, error);
@@ -268,7 +283,30 @@ export class FollowupsScheduler {
     await this.followupsService.markAsSent(followup.id, savedMessage.id);
     await this.supabase.updateLead(lead.id, { status: 'WAITING_FOR_USER' });
     
-    this.logger.log(`AI follow-up sent to lead ${lead.id}: "${message.substring(0, 50)}..."`);
+    this.logger.log(`AI follow-up sent to lead ${lead.id}: ${messageParts.length} part(s)`);
+  }
+
+  /**
+   * Split a message into multiple parts for human-like conversation.
+   * Messages are split by the "|||" delimiter.
+   */
+  private splitMessageIntoParts(message: string): string[] {
+    const parts = message.split('|||')
+      .map(part => part.trim())
+      .filter(part => part.length > 0);
+    
+    if (parts.length <= 1) {
+      return [message.trim()];
+    }
+    
+    return parts;
+  }
+
+  /**
+   * Helper to create a delay between messages
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
