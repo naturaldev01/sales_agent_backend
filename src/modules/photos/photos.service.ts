@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Inject, forwardRef } from '@nestjs/common';
 import { SupabaseService, PhotoAsset, Lead, LeadProfile } from '../../common/supabase/supabase.service';
 import { QueueService } from '../../common/queue/queue.service';
 import { AiClientService } from '../ai-client/ai-client.service';
@@ -59,6 +59,7 @@ export class PhotosService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly queueService: QueueService,
+    @Inject(forwardRef(() => AiClientService))
     private readonly aiClientService: AiClientService,
   ) {
     // Template images are in the template_images folder at project root
