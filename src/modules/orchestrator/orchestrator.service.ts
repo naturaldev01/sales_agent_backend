@@ -325,20 +325,25 @@ export class OrchestratorService {
           );
         }
 
-        // Queue each message part with delay for human-like delivery
-        // Delay between messages: 1.5 seconds (1500ms) per message
-        const MESSAGE_DELAY_MS = 1500;
+        // Queue each message part with SMART delay for human-like delivery
+        // Delay is calculated based on message length to simulate typing
+        let cumulativeDelay = 0;
         
         for (let i = 0; i < messageParts.length; i++) {
           const part = messageParts[i];
-          const delay = i * MESSAGE_DELAY_MS; // First message: 0ms, second: 1500ms, third: 3000ms, etc.
+          
+          // Calculate typing delay based on message length
+          const typingDelay = this.calculateTypingDelay(part, i);
+          cumulativeDelay += typingDelay;
           
           await this.queueService.addChannelSendJob({
             channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
             channelUserId: lead.channel_user_id!,
             content: part,
-            delay: delay,
+            delay: cumulativeDelay,
           });
+          
+          this.logger.debug(`Message part ${i + 1}/${messageParts.length} queued with ${cumulativeDelay}ms cumulative delay`);
         }
 
         this.logger.log(`${messageParts.length} message part(s) queued for sending: ${replyMessage.id}`);
@@ -446,6 +451,46 @@ export class OrchestratorService {
     };
 
     return messages[language] || messages.en;
+  }
+
+  /**
+   * Calculate realistic typing delay based on message length.
+   * Simulates human typing speed with natural variation.
+   * 
+   * @param message - The message content
+   * @param messageIndex - Index of message in sequence (0 = first)
+   * @returns Delay in milliseconds
+   */
+  private calculateTypingDelay(message: string, messageIndex: number): number {
+    // Constants for delay calculation
+    const BASE_DELAY_MS = 1000;           // Minimum base delay (1 second)
+    const MS_PER_CHAR = 50;               // ~50ms per character (simulates typing)
+    const MAX_DELAY_MS = 15000;           // Maximum delay (15 seconds)
+    const MIN_DELAY_MS = 2000;            // Minimum practical delay (2 seconds)
+    
+    // First message has no delay (send immediately)
+    if (messageIndex === 0) {
+      return 0;
+    }
+    
+    // Calculate base delay from message length
+    const charCount = message.length;
+    let delay = BASE_DELAY_MS + (charCount * MS_PER_CHAR);
+    
+    // Add random variation (±20%) for natural feel
+    const variation = delay * 0.2;
+    const randomOffset = (Math.random() * variation * 2) - variation;
+    delay += randomOffset;
+    
+    // Add extra "thinking" time for longer/complex messages
+    if (charCount > 100) {
+      delay += 2000; // Extra 2 seconds for complex messages
+    }
+    
+    // Clamp to min/max bounds
+    delay = Math.max(MIN_DELAY_MS, Math.min(MAX_DELAY_MS, delay));
+    
+    return Math.round(delay);
   }
 
   /**

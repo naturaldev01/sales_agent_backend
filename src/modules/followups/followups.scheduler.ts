@@ -13,6 +13,11 @@ import { FollowupsService, AiFollowupDecision } from './followups.service';
 import { WhatsappAdapter } from '../webhooks/adapters/whatsapp.adapter';
 import { TelegramAdapter } from '../webhooks/adapters/telegram.adapter';
 import { AiClientService } from '../ai-client/ai-client.service';
+import { 
+  getTimezoneFromCountry, 
+  getMessagingWindowStatus,
+  getCountryCode,
+} from '../../common/utils/timezone.utils';
 
 interface FollowupWithRelations extends Followup {
   leads: (Lead & { lead_profile: LeadProfile | null }) | null;
@@ -73,6 +78,24 @@ export class FollowupsScheduler {
         return;
       }
 
+      // ════════════════════════════════════════════════════════════════════
+      // 🌍 TIMEZONE CHECK: Don't send during sleeping hours
+      // ════════════════════════════════════════════════════════════════════
+      const timezoneCheck = await this.checkTimezoneWindow(lead);
+      if (!timezoneCheck.canSend) {
+        // Reschedule to next available window
+        this.logger.log(
+          `🌙 Follow-up delayed for lead ${lead.id}: ${timezoneCheck.reason}. ` +
+          `Rescheduling in ${timezoneCheck.waitHours}h`,
+        );
+        await this.followupsService.rescheduleFollowupWithTimezone(
+          followup.id,
+          lead.id,
+          timezoneCheck.waitHours,
+        );
+        return;
+      }
+
       // Get settings to check if AI timing is enabled
       const settings = await this.followupsService.getSettings();
       
@@ -86,6 +109,47 @@ export class FollowupsScheduler {
     } catch (error) {
       this.logger.error(`Error processing followup ${followup.id}:`, error);
     }
+  }
+
+  /**
+   * Check if we can send a message based on lead's timezone
+   */
+  private async checkTimezoneWindow(lead: Lead): Promise<{
+    canSend: boolean;
+    waitHours: number;
+    reason: string;
+  }> {
+    // Get timezone from lead or derive from country
+    const country = lead.country;
+    let timezone = lead.timezone;
+    
+    if (!timezone && country) {
+      timezone = getTimezoneFromCountry(country);
+      
+      // Save derived timezone for future use
+      if (timezone) {
+        await this.supabase.updateLead(lead.id, { timezone });
+        this.logger.debug(`🌍 Timezone derived: ${country} → ${timezone}`);
+      }
+    }
+    
+    if (!timezone) {
+      // No timezone info available - allow sending
+      return { canSend: true, waitHours: 0, reason: 'No timezone info' };
+    }
+    
+    const countryCode = getCountryCode(country);
+    const status = getMessagingWindowStatus(timezone, countryCode, {
+      startHour: 9,
+      endHour: 21,
+      avoidWeekends: false, // Follow-ups can go on weekends but not at night
+    });
+    
+    return {
+      canSend: status.canSend,
+      waitHours: status.waitHours,
+      reason: status.reason,
+    };
   }
 
   /**
@@ -112,6 +176,9 @@ export class FollowupsScheduler {
       timestamp: m.created_at || '',
     }));
 
+    // Get timezone for AI context
+    const timezone = lead.timezone || getTimezoneFromCountry(lead.country);
+    
     // Ask AI for follow-up decision
     const aiResponse = await this.aiClientService.analyzeFollowupTiming({
       leadId: lead.id,
@@ -124,6 +191,7 @@ export class FollowupsScheduler {
         desireScore: lead.desire_score || undefined,
         profile: lead.lead_profile || undefined,
         hasPhotos: hasPhotos,
+        timezone: timezone || undefined,
       },
       lastUserResponseAt: lastUserResponseAt || undefined,
       followupCount: followupCount,

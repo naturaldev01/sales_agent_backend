@@ -1,6 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SupabaseService } from '../../common/supabase/supabase.service';
 import { QueueService } from '../../common/queue/queue.service';
+import {
+  getTimezoneFromCountry,
+  getCountryCode,
+  calculateOptimalSendTime,
+  getMessagingWindowStatus,
+  getTimezoneContext,
+  TimezoneContext,
+  MessagingWindowStatus,
+} from '../../common/utils/timezone.utils';
 
 interface FollowupSettings {
   intervals_hours: number[];
@@ -214,6 +223,168 @@ export class FollowupsService {
 
   async cancelPendingForLead(leadId: string): Promise<void> {
     await this.supabase.cancelPendingFollowups(leadId);
+  }
+
+  // ==================== TIMEZONE-AWARE SCHEDULING ====================
+
+  /**
+   * Schedule a smart follow-up that respects the lead's timezone
+   * This is the main method for timezone-aware scheduling
+   */
+  async scheduleSmartFollowup(
+    leadId: string,
+    conversationId: string,
+    waitHours: number,
+  ): Promise<{ scheduledAt: Date; timezone: string | null; adjusted: boolean }> {
+    const settings = await this.getSettings();
+    const lead = await this.supabase.getLeadById(leadId);
+
+    if (!lead) {
+      throw new Error(`Lead not found: ${leadId}`);
+    }
+
+    // Determine timezone (from lead.timezone or derive from country)
+    let timezone = lead.timezone || null;
+    let countryCode = getCountryCode(lead.country);
+
+    if (!timezone && lead.country) {
+      timezone = getTimezoneFromCountry(lead.country);
+
+      // Save derived timezone to lead for future use
+      if (timezone) {
+        await this.supabase.updateLead(leadId, { timezone });
+        this.logger.log(`🌍 Timezone derived and saved: ${lead.country} → ${timezone}`);
+      }
+    }
+
+    // Parse working hours
+    const startHour = parseInt(settings.working_hours_start.split(':')[0], 10);
+    const endHour = parseInt(settings.working_hours_end.split(':')[0], 10);
+
+    // Calculate optimal send time considering timezone
+    const sendTime = calculateOptimalSendTime(
+      timezone,
+      waitHours,
+      countryCode,
+      {
+        startHour,
+        endHour,
+        avoidWeekends: true,
+      },
+    );
+
+    // Check if time was adjusted
+    const originalTime = new Date();
+    originalTime.setHours(originalTime.getHours() + waitHours);
+    const wasAdjusted = sendTime.getTime() !== originalTime.getTime();
+
+    // Cancel existing pending follow-ups
+    await this.supabase.cancelPendingFollowups(leadId);
+
+    // Create new follow-up
+    await this.supabase.createFollowup({
+      lead_id: leadId,
+      conversation_id: conversationId,
+      followup_type: 'ai_analysis',
+      attempt_number: 0,
+      scheduled_at: sendTime.toISOString(),
+    });
+
+    // Log with timezone info
+    if (timezone) {
+      this.logger.log(
+        `🕐 Smart follow-up scheduled for lead ${leadId} at ${sendTime.toISOString()} ` +
+        `(${timezone}, ${wasAdjusted ? 'ADJUSTED' : 'no change'})`,
+      );
+    } else {
+      this.logger.log(
+        `📅 Follow-up scheduled for lead ${leadId} at ${sendTime.toISOString()} (no timezone info)`,
+      );
+    }
+
+    return { scheduledAt: sendTime, timezone, adjusted: wasAdjusted };
+  }
+
+  /**
+   * Check if we should send a message NOW based on lead's timezone
+   * Returns send status with wait time if needed
+   */
+  shouldSendNow(lead: {
+    timezone?: string | null;
+    country?: string | null;
+  }): MessagingWindowStatus {
+    // Get timezone (from lead or derive from country)
+    const timezone = lead.timezone || getTimezoneFromCountry(lead.country ?? null);
+    const countryCode = getCountryCode(lead.country ?? null);
+
+    if (!timezone) {
+      // No timezone info - allow sending (conservative approach)
+      return {
+        canSend: true,
+        currentHour: new Date().getHours(),
+        currentDay: 'Unknown',
+        isWeekend: false,
+        waitHours: 0,
+        reason: 'No timezone info - allowing send',
+        nextWindowTime: 'Now',
+      };
+    }
+
+    return getMessagingWindowStatus(timezone, countryCode, {
+      startHour: 9,
+      endHour: 21,
+      avoidWeekends: true,
+    });
+  }
+
+  /**
+   * Get timezone context for AI agents (to include in prompts)
+   */
+  getTimezoneContextForLead(lead: {
+    timezone?: string | null;
+    country?: string | null;
+  }): TimezoneContext {
+    return getTimezoneContext(lead.country ?? null, lead.timezone ?? null);
+  }
+
+  /**
+   * Reschedule a follow-up with timezone awareness
+   */
+  async rescheduleFollowupWithTimezone(
+    followupId: string,
+    leadId: string,
+    waitHours: number,
+  ): Promise<void> {
+    const lead = await this.supabase.getLeadById(leadId);
+    
+    if (!lead) {
+      // Fallback to simple reschedule
+      return this.rescheduleFollowup(followupId, waitHours);
+    }
+
+    const timezone = lead.timezone || getTimezoneFromCountry(lead.country);
+    const countryCode = getCountryCode(lead.country);
+    const settings = await this.getSettings();
+
+    const startHour = parseInt(settings.working_hours_start.split(':')[0], 10);
+    const endHour = parseInt(settings.working_hours_end.split(':')[0], 10);
+
+    const sendTime = calculateOptimalSendTime(
+      timezone,
+      waitHours,
+      countryCode,
+      { startHour, endHour, avoidWeekends: true },
+    );
+
+    await this.supabase.updateFollowup(followupId, {
+      scheduled_at: sendTime.toISOString(),
+      status: 'pending',
+    });
+
+    this.logger.debug(
+      `Follow-up ${followupId} rescheduled to ${sendTime.toISOString()} ` +
+      `(timezone: ${timezone || 'unknown'})`,
+    );
   }
 
   getFollowupMessage(language: string, attemptNumber: number): string {

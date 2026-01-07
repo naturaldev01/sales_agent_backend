@@ -62,6 +62,8 @@ export interface FollowupAnalysisRequest {
     desireScore?: number;
     profile?: Record<string, unknown>;
     hasPhotos?: boolean;
+    // Timezone context for smart scheduling
+    timezone?: string;
   };
   lastUserResponseAt?: string;
   followupCount: number;
