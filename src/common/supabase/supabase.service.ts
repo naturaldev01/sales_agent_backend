@@ -351,8 +351,11 @@ export class SupabaseService implements OnModuleInit {
     weight_kg: number;
     
     // Treatment info
+    treatment_category: string;
     complaint: string;
     has_previous_treatment: string;
+    urgency: string;
+    budget_mentioned: string;
     consent_given: boolean;
     
     // Medical history
@@ -368,6 +371,7 @@ export class SupabaseService implements OnModuleInit {
     // System fields
     extracted_fields_json: Record<string, unknown>;
     agent_name: string;
+    language_preference: string;
   }>): Promise<LeadProfile> {
     // Build upsert data - only include defined fields to avoid overwriting with null
     const upsertData: Record<string, unknown> = {
@@ -386,8 +390,11 @@ export class SupabaseService implements OnModuleInit {
     if (data.weight_kg !== undefined) upsertData.weight_kg = data.weight_kg;
     
     // Treatment info
+    if (data.treatment_category !== undefined) upsertData.treatment_category = data.treatment_category;
     if (data.complaint !== undefined) upsertData.complaint = data.complaint;
     if (data.has_previous_treatment !== undefined) upsertData.has_previous_treatment = data.has_previous_treatment;
+    if (data.urgency !== undefined) upsertData.urgency = data.urgency;
+    if (data.budget_mentioned !== undefined) upsertData.budget_mentioned = data.budget_mentioned;
     if (data.consent_given !== undefined) upsertData.consent_given = data.consent_given;
     
     // Medical history
@@ -403,6 +410,7 @@ export class SupabaseService implements OnModuleInit {
     // System fields
     if (data.extracted_fields_json !== undefined) upsertData.extracted_fields_json = data.extracted_fields_json;
     if (data.agent_name !== undefined) upsertData.agent_name = data.agent_name;
+    if (data.language_preference !== undefined) upsertData.language_preference = data.language_preference;
     
     this.logger.log(`Upserting lead_profile for ${leadId}: ${JSON.stringify(upsertData)}`);
     

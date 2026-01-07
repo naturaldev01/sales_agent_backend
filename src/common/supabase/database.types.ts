@@ -516,6 +516,7 @@ export type Database = {
           alcohol_use: string | null
           allergies_detail: string | null
           birth_date: string | null
+          budget_mentioned: string | null
           chronic_disease_detail: string | null
           city: string | null
           complaint: string | null
@@ -531,6 +532,7 @@ export type Database = {
           has_previous_surgery: boolean | null
           has_previous_treatment: string | null
           height_cm: number | null
+          language_preference: string | null
           lead_id: string
           name: string | null
           notes: string | null
@@ -538,7 +540,9 @@ export type Database = {
           previous_surgery_detail: string | null
           previous_treatment_details: string | null
           smoking_use: string | null
+          treatment_category: string | null
           updated_at: string | null
+          urgency: string | null
           weight_kg: number | null
         }
         Insert: {
@@ -547,6 +551,7 @@ export type Database = {
           alcohol_use?: string | null
           allergies_detail?: string | null
           birth_date?: string | null
+          budget_mentioned?: string | null
           chronic_disease_detail?: string | null
           city?: string | null
           complaint?: string | null
@@ -562,6 +567,7 @@ export type Database = {
           has_previous_surgery?: boolean | null
           has_previous_treatment?: string | null
           height_cm?: number | null
+          language_preference?: string | null
           lead_id: string
           name?: string | null
           notes?: string | null
@@ -569,7 +575,9 @@ export type Database = {
           previous_surgery_detail?: string | null
           previous_treatment_details?: string | null
           smoking_use?: string | null
+          treatment_category?: string | null
           updated_at?: string | null
+          urgency?: string | null
           weight_kg?: number | null
         }
         Update: {
@@ -578,6 +586,7 @@ export type Database = {
           alcohol_use?: string | null
           allergies_detail?: string | null
           birth_date?: string | null
+          budget_mentioned?: string | null
           chronic_disease_detail?: string | null
           city?: string | null
           complaint?: string | null
@@ -593,6 +602,7 @@ export type Database = {
           has_previous_surgery?: boolean | null
           has_previous_treatment?: string | null
           height_cm?: number | null
+          language_preference?: string | null
           lead_id?: string
           name?: string | null
           notes?: string | null
@@ -600,7 +610,9 @@ export type Database = {
           previous_surgery_detail?: string | null
           previous_treatment_details?: string | null
           smoking_use?: string | null
+          treatment_category?: string | null
           updated_at?: string | null
+          urgency?: string | null
           weight_kg?: number | null
         }
         Relationships: [

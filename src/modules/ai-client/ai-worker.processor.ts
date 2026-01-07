@@ -483,8 +483,11 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
       weight_kg: 'weight_kg',
       
       // Treatment info
+      treatment_category: 'treatment_category',
       complaint: 'complaint',
       previous_treatment: 'has_previous_treatment',
+      urgency: 'urgency',
+      budget_mentioned: 'budget_mentioned',
       
       // Medical history
       has_allergies: 'has_allergies',
@@ -495,6 +498,10 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
       previous_surgery_detail: 'previous_surgery_detail',
       alcohol_use: 'alcohol_use',
       smoking_use: 'smoking_use',
+      
+      // Language
+      language: 'language_preference',
+      detected_language: 'language_preference',
     };
 
     const profile: Record<string, unknown> = {};
