@@ -1,8 +1,9 @@
-import { Controller, Get, Patch, Param, Query, Body, Res, Req, Logger, ParseUUIDPipe, BadRequestException, NotFoundException, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Query, Body, Res, Req, Logger, ParseUUIDPipe, BadRequestException, NotFoundException, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery, ApiParam, ApiBody } from '@nestjs/swagger';
 import { Response, Request } from 'express';
 import { PhotosService } from './photos.service';
 import { AuthGuard } from '../../common/guards/auth.guard';
+import { RolesGuard, Roles } from '../../common/guards/roles.guard';
 
 const OptionalUUIDPipe = new ParseUUIDPipe({
   exceptionFactory: () => new BadRequestException('Invalid UUID format'),
@@ -108,6 +109,59 @@ export class PhotosController {
     
     this.logger.log(`Rejecting photo ${id} by user ${userId}. Reason: ${body.reason}`);
     return this.photosService.rejectPhoto(id, userId, body.reason);
+  }
+
+  @Post('templates/upload-all')
+  @UseGuards(AuthGuard, RolesGuard)
+  @Roles('admin')
+  @ApiOperation({ summary: 'Upload all local template images to Supabase Storage and update database URLs' })
+  async uploadAllTemplateImages() {
+    this.logger.log('Starting upload of all template images to Supabase Storage');
+    
+    const results: Record<string, string | null> = {};
+    const treatmentCategories = [
+      'hair_transplant', 'hair_transplant_female', 'dental', 'rhinoplasty',
+      'breast', 'liposuction', 'bbl', 'arm_lift', 'facelift'
+    ];
+    const languages = ['en', 'tr', 'ar', 'fr', 'ru'];
+    
+    for (const category of treatmentCategories) {
+      for (const lang of languages) {
+        const imageData = await this.photosService.getTemplateImageBuffer(category, lang);
+        if (imageData) {
+          const url = await this.photosService.uploadAndUpdateTemplateImage(
+            category,
+            lang,
+            imageData.buffer,
+            imageData.filename,
+          );
+          results[`${category}/${lang}`] = url;
+          this.logger.log(`Uploaded: ${category}/${lang} -> ${url}`);
+        }
+      }
+    }
+    
+    return {
+      message: 'Template images upload completed',
+      results,
+    };
+  }
+
+  @Get('template-url/:treatmentCategory')
+  @ApiOperation({ summary: 'Get template image URL for a treatment category' })
+  @ApiParam({ name: 'treatmentCategory', type: String })
+  @ApiQuery({ name: 'language', required: false, type: String })
+  async getTemplateImageUrl(
+    @Param('treatmentCategory') treatmentCategory: string,
+    @Query('language') language: string = 'en',
+  ) {
+    const url = await this.photosService.getTemplateImageUrl(treatmentCategory, language);
+    
+    if (!url) {
+      throw new NotFoundException(`Template image URL not found for ${treatmentCategory}/${language}`);
+    }
+
+    return { url };
   }
 }
 

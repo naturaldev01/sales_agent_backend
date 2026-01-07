@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { SupabaseService, PhotoAsset, Lead, LeadProfile } from '../../common/supabase/supabase.service';
 import { QueueService } from '../../common/queue/queue.service';
+import { AiClientService } from '../ai-client/ai-client.service';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -58,6 +59,7 @@ export class PhotosService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly queueService: QueueService,
+    private readonly aiClientService: AiClientService,
   ) {
     // Template images are in the template_images folder at project root
     this.templateImagesPath = path.join(process.cwd(), 'template_images');
@@ -196,6 +198,94 @@ export class PhotosService {
     return this.supabase.getTemplateImagePath(treatmentCategory);
   }
 
+  /**
+   * Get template image URL from database for a treatment category
+   * This checks the photo_checklists table for a stored public URL
+   */
+  async getTemplateImageUrl(treatmentCategory: string, language: string = 'en'): Promise<string | null> {
+    try {
+      // First try to get from photo_checklists table (database URL)
+      const { data, error } = await this.supabase.client
+        .from('photo_checklists')
+        .select('template_image_url, template_image_path')
+        .eq('treatment_category', treatmentCategory)
+        .eq('is_active', true)
+        .limit(1)
+        .single();
+
+      if (!error && data?.template_image_url) {
+        return data.template_image_url;
+      }
+
+      // Fallback: Try to get from Supabase Storage (template-images bucket)
+      const filename = this.getTemplateImageFilename(treatmentCategory, language);
+      if (filename) {
+        const { data: urlData } = this.supabase.client.storage
+          .from('template-images')
+          .getPublicUrl(filename);
+        
+        if (urlData?.publicUrl) {
+          return urlData.publicUrl;
+        }
+      }
+
+      return null;
+    } catch (error) {
+      this.logger.error(`Failed to get template image URL for ${treatmentCategory}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Upload template image to Supabase Storage and update database URL
+   */
+  async uploadAndUpdateTemplateImage(
+    treatmentCategory: string,
+    language: string,
+    imageBuffer: Buffer,
+    filename: string,
+  ): Promise<string | null> {
+    try {
+      const storagePath = filename;
+      
+      // Upload to Supabase Storage
+      const { error: uploadError } = await this.supabase.client.storage
+        .from('template-images')
+        .upload(storagePath, imageBuffer, {
+          contentType: 'image/jpeg',
+          upsert: true,
+        });
+
+      if (uploadError) {
+        this.logger.error(`Failed to upload template image: ${uploadError.message}`);
+        return null;
+      }
+
+      // Get public URL
+      const { data: urlData } = this.supabase.client.storage
+        .from('template-images')
+        .getPublicUrl(storagePath);
+
+      const publicUrl = urlData?.publicUrl;
+      
+      if (publicUrl) {
+        // Update photo_checklists table with the URL
+        await this.supabase.client
+          .from('photo_checklists')
+          .update({ template_image_url: publicUrl })
+          .eq('treatment_category', treatmentCategory)
+          .eq('is_active', true);
+        
+        this.logger.log(`Template image uploaded and URL updated: ${publicUrl}`);
+      }
+
+      return publicUrl || null;
+    } catch (error) {
+      this.logger.error(`Error uploading template image:`, error);
+      return null;
+    }
+  }
+
   // ==================== PHOTO VERIFICATION ====================
 
   /**
@@ -224,10 +314,10 @@ export class PhotosService {
   }
 
   /**
-   * Reject a photo and send notification to the user
+   * Reject a photo and send AI-generated notification to the user
    */
   async rejectPhoto(id: string, userId: string, reason: string): Promise<PhotoAssetWithLeadInfo> {
-    // First, get the photo with lead info
+    // First, get the photo with lead info and treatment category
     const { data: photo, error: fetchError } = await this.supabase.client
       .from('photo_assets')
       .select(`
@@ -237,7 +327,8 @@ export class PhotosService {
           channel,
           channel_user_id,
           language,
-          lead_profile (name)
+          treatment_category,
+          lead_profile (name, country, city)
         )
       `)
       .eq('id', id)
@@ -267,12 +358,34 @@ export class PhotosService {
 
     this.logger.log(`Photo ${id} rejected by user ${userId}. Reason: ${reason}`);
 
-    // Send notification to the user via the channel
+    // Send AI-generated notification to the user via the channel
     const lead = photo.leads as any;
     if (lead?.channel && lead?.channel_user_id) {
-      const message = this.getRejectionMessage(lead.language || 'en', reason);
-      
       try {
+        // Get recent conversation for context
+        const recentMessages = await this.getRecentConversationMessages(lead.id, 5);
+        
+        // Generate AI rejection message
+        const aiResponse = await this.aiClientService.generatePhotoRejectionMessage({
+          leadId: lead.id,
+          language: lead.language || 'en',
+          rejectionReason: reason,
+          treatmentCategory: lead.treatment_category || undefined,
+          messages: recentMessages,
+          leadProfile: lead.lead_profile || undefined,
+        });
+
+        let message: string;
+        
+        if (aiResponse.success && aiResponse.data?.message) {
+          message = aiResponse.data.message;
+          this.logger.log(`AI generated rejection message for lead ${lead.id}, tone: ${aiResponse.data.tone}`);
+        } else {
+          // Fallback to static message if AI fails
+          this.logger.warn(`AI rejection message failed, using fallback. Error: ${aiResponse.error}`);
+          message = this.getFallbackRejectionMessage(lead.language || 'en', reason);
+        }
+        
         await this.queueService.addChannelSendJob({
           channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
           channelUserId: lead.channel_user_id,
@@ -289,9 +402,55 @@ export class PhotosService {
   }
 
   /**
-   * Get localized rejection message
+   * Get recent conversation messages for AI context
    */
-  private getRejectionMessage(language: string, reason: string): string {
+  private async getRecentConversationMessages(leadId: string, limit: number = 5): Promise<Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp?: string;
+  }>> {
+    try {
+      // Get conversation for this lead
+      const { data: conversation } = await this.supabase.client
+        .from('conversations')
+        .select('id')
+        .eq('lead_id', leadId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (!conversation) {
+        return [];
+      }
+
+      // Get recent messages
+      const { data: messages } = await this.supabase.client
+        .from('messages')
+        .select('content, direction, created_at')
+        .eq('conversation_id', conversation.id)
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (!messages) {
+        return [];
+      }
+
+      // Convert to AI format (reverse to get chronological order)
+      return messages.reverse().map(m => ({
+        role: m.direction === 'in' ? 'user' as const : 'assistant' as const,
+        content: m.content || '',
+        timestamp: m.created_at || undefined,
+      }));
+    } catch (error) {
+      this.logger.error(`Failed to get recent messages for lead ${leadId}:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * Fallback rejection message when AI is unavailable
+   */
+  private getFallbackRejectionMessage(language: string, reason: string): string {
     const messages: Record<string, string> = {
       en: `⚠️ Photo Update Required\n\nYour photo was not accepted.\nReason: ${reason}\n\nPlease send clearer photos following our guidelines. This helps our doctors provide you with the best evaluation possible. 📸`,
       tr: `⚠️ Fotoğraf Güncelleme Gerekli\n\nFotoğrafınız kabul edilmedi.\nSebep: ${reason}\n\nLütfen yönergelerimize uygun, daha net fotoğraflar gönderin. Bu, doktorlarımızın size en iyi değerlendirmeyi yapabilmesi için önemlidir. 📸`,

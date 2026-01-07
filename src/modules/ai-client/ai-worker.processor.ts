@@ -334,18 +334,21 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
 
   private async scheduleFollowupIfNeeded(leadId: string, conversationId: string): Promise<void> {
     try {
-      // Get follow-up settings
-      const settings = await this.supabase.getConfig('followup_settings') as {
+      // Get follow-up settings (with defaults if not configured)
+      const configSettings = await this.supabase.getConfig('followup_settings') as {
         intervals_hours?: number[];
         max_attempts?: number;
+        use_ai_timing?: boolean;
       } | null;
       
-      if (!settings) {
-        this.logger.debug('No followup settings found, skipping followup scheduling');
-        return;
-      }
+      // Use defaults if no config exists
+      const settings = {
+        intervals_hours: configSettings?.intervals_hours || [2, 24, 72],
+        max_attempts: configSettings?.max_attempts || 3,
+        use_ai_timing: configSettings?.use_ai_timing ?? true,
+      };
 
-      const intervals = settings.intervals_hours || [2, 24, 72];
+      const intervals = settings.intervals_hours;
 
       // Cancel any existing pending follow-ups for this lead
       await this.supabase.cancelPendingFollowups(leadId);

@@ -87,6 +87,32 @@ export interface FollowupAnalysisResponse {
   error?: string;
 }
 
+export interface PhotoRejectionRequest {
+  leadId: string;
+  language: string;
+  rejectionReason: string;
+  treatmentCategory?: string;
+  messages?: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp?: string;
+  }>;
+  leadProfile?: Record<string, unknown>;
+}
+
+export interface PhotoRejectionResponse {
+  success: boolean;
+  data?: {
+    message: string;
+    tone: string;
+    includesGuidelines: boolean;
+    model: string;
+    tokensUsed: number;
+    latencyMs: number;
+  };
+  error?: string;
+}
+
 @Injectable()
 export class AiClientService {
   private readonly logger = new Logger(AiClientService.name);
@@ -255,6 +281,45 @@ export class AiClientService {
       };
     } catch (error: any) {
       this.logger.error('Follow-up analysis request failed:', error.message);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Generate a personalized photo rejection message using AI.
+   * Called when a doctor rejects a photo from the dashboard.
+   */
+  async generatePhotoRejectionMessage(request: PhotoRejectionRequest): Promise<PhotoRejectionResponse> {
+    try {
+      const response = await axios.post(
+        `${this.aiWorkerUrl}/api/v1/generate-rejection-message`,
+        {
+          leadId: request.leadId,
+          language: request.language,
+          rejectionReason: request.rejectionReason,
+          treatmentCategory: request.treatmentCategory,
+          messages: request.messages,
+          leadProfile: request.leadProfile,
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.apiKey}`,
+          },
+          timeout: 30000, // 30 second timeout
+        },
+      );
+
+      return {
+        success: response.data.success,
+        data: response.data.data,
+        error: response.data.error,
+      };
+    } catch (error: any) {
+      this.logger.error('Photo rejection message generation failed:', error.message);
       return {
         success: false,
         error: error.message,

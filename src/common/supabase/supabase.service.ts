@@ -124,6 +124,8 @@ export class SupabaseService implements OnModuleInit {
     price_currency: string;
     sales_price_set_by: string;
     sales_price_set_at: string;
+    // Timezone field
+    timezone: string;
   }>): Promise<Lead> {
     const updateData: LeadUpdate = {
       status: data.status,
@@ -142,6 +144,8 @@ export class SupabaseService implements OnModuleInit {
       price_currency: data.price_currency,
       sales_price_set_by: data.sales_price_set_by,
       sales_price_set_at: data.sales_price_set_at,
+      // Timezone field
+      timezone: data.timezone,
     };
     
     // Remove undefined values

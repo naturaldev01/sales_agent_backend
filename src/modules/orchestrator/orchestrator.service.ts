@@ -515,24 +515,73 @@ export class OrchestratorService {
 
   /**
    * Check if a message is requesting photos from the user
+   * Enhanced with more keywords and photo instruction patterns
    */
   private isPhotoRequestMessage(message: string, language: string): boolean {
     const photoKeywords: Record<string, string[]> = {
-      en: ['photo', 'picture', 'image', 'send us', 'share', 'upload'],
-      tr: ['fotoğraf', 'resim', 'görsel', 'gönderin', 'paylaşın', 'yükleyin'],
-      ar: ['صور', 'صورة', 'ارسل', 'شارك'],
-      ru: ['фото', 'фотографи', 'снимок', 'отправьте', 'загрузите'],
-      fr: ['photo', 'image', 'envoyez', 'partagez'],
+      en: [
+        'photo', 'picture', 'image', 'send us', 'share', 'upload',
+        'please send', 'could you send', 'would you send',
+        'front view', 'side view', 'top view', 'back view',
+        'show us', 'provide', 'attach'
+      ],
+      tr: [
+        'fotoğraf', 'resim', 'görsel', 'gönderin', 'paylaşın', 'yükleyin',
+        'lütfen gönderin', 'gönderir misiniz', 'gönderebilir misiniz',
+        'önden görünüm', 'yandan görünüm', 'tepeden görünüm',
+        'gösterin', 'paylaşabilir', 'fotoğraflarınızı'
+      ],
+      ar: [
+        'صور', 'صورة', 'ارسل', 'شارك', 'ارسال',
+        'يرجى إرسال', 'من فضلك ارسل',
+        'منظر أمامي', 'منظر جانبي'
+      ],
+      ru: [
+        'фото', 'фотографи', 'снимок', 'отправьте', 'загрузите',
+        'пожалуйста отправьте', 'можете отправить',
+        'вид спереди', 'вид сбоку'
+      ],
+      fr: [
+        'photo', 'image', 'envoyez', 'partagez',
+        'veuillez envoyer', 'pouvez-vous envoyer',
+        'vue de face', 'profil'
+      ],
     };
 
+    // Photo instruction patterns that strongly indicate photo request
+    const photoInstructionPatterns = [
+      /\d+\.\s*\*?\*?(front|önden|أمامي|спереди|face)/i,
+      /\d+\.\s*\*?\*?(side|yan|جانب|сбоку|profil)/i,
+      /\d+\.\s*\*?\*?(top|tepe|علوي|сверху|dessus)/i,
+      /\d+\.\s*\*?\*?(back|arka|خلف|сзади|arrière)/i,
+      /açılardan.*fotoğraf/i,
+      /photos from.*angles/i,
+      /صور من.*زوايا/i,
+    ];
+
     const keywords = photoKeywords[language] || photoKeywords.en;
+    // Also include English keywords as fallback since AI sometimes uses English terms
+    const allKeywords = [...new Set([...keywords, ...photoKeywords.en])];
     const messageLower = message.toLowerCase();
     
-    return keywords.some(keyword => messageLower.includes(keyword));
+    // Check keywords
+    const hasKeyword = allKeywords.some(keyword => messageLower.includes(keyword.toLowerCase()));
+    
+    // Check instruction patterns
+    const hasInstructionPattern = photoInstructionPatterns.some(pattern => pattern.test(message));
+    
+    const isPhotoRequest = hasKeyword || hasInstructionPattern;
+    
+    if (isPhotoRequest) {
+      this.logger.debug(`Photo request detected in message (language: ${language}): "${message.substring(0, 100)}..."`);
+    }
+    
+    return isPhotoRequest;
   }
 
   /**
    * Send template image to user if available for their treatment category
+   * Supports both file system and Supabase Storage sources
    */
   private async sendTemplateImageIfAvailable(
     channel: 'whatsapp' | 'telegram' | 'web',
@@ -541,29 +590,111 @@ export class OrchestratorService {
     language: string,
   ): Promise<boolean> {
     try {
-      // Get template image for the treatment
+      this.logger.log(`Attempting to send template image for ${treatmentCategory}/${language} via ${channel}`);
+      
+      const caption = this.getTemplateCaption(treatmentCategory, language);
+
+      // Strategy 1: Try to get image buffer from file system (for local/deployment with files)
       const imageData = await this.photosService.getTemplateImageBuffer(treatmentCategory, language);
       
-      if (!imageData) {
-        this.logger.debug(`No template image available for ${treatmentCategory}/${language}`);
-        return false;
-      }
-
-      // Send the template image via the appropriate channel
-      if (channel === 'telegram' && this.telegramBotToken) {
-        await this.sendTelegramPhoto(channelUserId, imageData.buffer, this.getTemplateCaption(treatmentCategory, language));
-        this.logger.log(`Template image sent for ${treatmentCategory} to ${channel}:${channelUserId}`);
+      if (imageData && channel === 'telegram' && this.telegramBotToken) {
+        await this.sendTelegramPhoto(channelUserId, imageData.buffer, caption);
+        this.logger.log(`✅ Template image sent from file system for ${treatmentCategory} to ${channel}:${channelUserId}`);
         return true;
       }
+
+      // Strategy 2: Try to get URL from database/Supabase Storage
+      const templateUrl = await this.photosService.getTemplateImageUrl(treatmentCategory, language);
       
-      // For WhatsApp, we would use the WhatsApp Business API
-      // For web, we might use a different approach (e.g., URL)
-      this.logger.debug(`Template image sending not implemented for channel: ${channel}`);
+      if (templateUrl) {
+        if (channel === 'telegram' && this.telegramBotToken) {
+          await this.sendTelegramPhotoByUrl(channelUserId, templateUrl, caption);
+          this.logger.log(`✅ Template image sent from URL for ${treatmentCategory} to ${channel}:${channelUserId}`);
+          return true;
+        }
+        
+        // For WhatsApp, we can use the URL directly
+        if (channel === 'whatsapp') {
+          await this.sendWhatsAppPhoto(channelUserId, templateUrl, caption);
+          this.logger.log(`✅ Template image sent via WhatsApp for ${treatmentCategory} to ${channelUserId}`);
+          return true;
+        }
+      }
+
+      // Strategy 3: If no local file and no URL, try to upload from local and get URL
+      if (imageData && !templateUrl) {
+        const uploadedUrl = await this.photosService.uploadAndUpdateTemplateImage(
+          treatmentCategory,
+          language,
+          imageData.buffer,
+          imageData.filename,
+        );
+        
+        if (uploadedUrl && channel === 'telegram' && this.telegramBotToken) {
+          await this.sendTelegramPhotoByUrl(channelUserId, uploadedUrl, caption);
+          this.logger.log(`✅ Template image uploaded and sent for ${treatmentCategory} to ${channel}:${channelUserId}`);
+          return true;
+        }
+      }
+      
+      this.logger.warn(`No template image available for ${treatmentCategory}/${language} on channel ${channel}`);
       return false;
     } catch (error) {
       this.logger.error(`Failed to send template image for ${treatmentCategory}:`, error);
       return false;
     }
+  }
+
+  /**
+   * Send photo via Telegram using URL
+   */
+  private async sendTelegramPhotoByUrl(chatId: string, photoUrl: string, caption?: string): Promise<void> {
+    if (!this.telegramBotToken) {
+      throw new Error('Telegram bot token not configured');
+    }
+
+    await axios.post(
+      `https://api.telegram.org/bot${this.telegramBotToken}/sendPhoto`,
+      {
+        chat_id: chatId,
+        photo: photoUrl,
+        caption: caption,
+      },
+    );
+  }
+
+  /**
+   * Send photo via WhatsApp using URL
+   */
+  private async sendWhatsAppPhoto(phoneNumber: string, imageUrl: string, caption?: string): Promise<void> {
+    const whatsappPhoneId = this.configService.get<string>('WHATSAPP_PHONE_NUMBER_ID');
+    const whatsappToken = this.configService.get<string>('WHATSAPP_ACCESS_TOKEN');
+    
+    if (!whatsappPhoneId || !whatsappToken) {
+      this.logger.warn('WhatsApp credentials not configured, skipping photo send');
+      return;
+    }
+
+    const url = `https://graph.facebook.com/v18.0/${whatsappPhoneId}/messages`;
+    
+    await axios.post(
+      url,
+      {
+        messaging_product: 'whatsapp',
+        to: phoneNumber,
+        type: 'image',
+        image: {
+          link: imageUrl,
+          caption: caption,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${whatsappToken}`,
+          'Content-Type': 'application/json',
+        },
+      },
+    );
   }
 
   /**
@@ -752,32 +883,41 @@ export class OrchestratorService {
   }
 
   private async scheduleFollowupIfNeeded(leadId: string, conversationId: string): Promise<void> {
-    // Get follow-up settings
-    const settings = await this.supabase.getConfig('followup_settings') as {
-      intervals_hours?: number[];
-      max_attempts?: number;
-    } | null;
-    
-    if (!settings) return;
+    try {
+      // Get follow-up settings (with defaults if not configured)
+      const configSettings = await this.supabase.getConfig('followup_settings') as {
+        intervals_hours?: number[];
+        max_attempts?: number;
+        use_ai_timing?: boolean;
+      } | null;
+      
+      // Use defaults if no config exists
+      const settings = {
+        intervals_hours: configSettings?.intervals_hours || [2, 24, 72],
+        max_attempts: configSettings?.max_attempts || 3,
+        use_ai_timing: configSettings?.use_ai_timing ?? true,
+      };
 
-    const intervals = settings.intervals_hours || [2, 24, 72];
-    const maxAttempts = settings.max_attempts || 3;
+      const intervals = settings.intervals_hours;
 
-    // Check existing follow-ups
-    // For now, just schedule the first follow-up
-    // A more complete implementation would check existing follow-ups
+      // Cancel any existing pending follow-ups for this lead before scheduling new one
+      await this.supabase.cancelPendingFollowups(leadId);
 
-    const scheduledAt = new Date();
-    scheduledAt.setHours(scheduledAt.getHours() + intervals[0]);
+      // Schedule new follow-up
+      const scheduledAt = new Date();
+      scheduledAt.setHours(scheduledAt.getHours() + intervals[0]);
 
-    await this.supabase.createFollowup({
-      lead_id: leadId,
-      conversation_id: conversationId,
-      followup_type: 'reminder',
-      attempt_number: 1,
-      scheduled_at: scheduledAt.toISOString(),
-    });
+      await this.supabase.createFollowup({
+        lead_id: leadId,
+        conversation_id: conversationId,
+        followup_type: 'reminder',
+        attempt_number: 1,
+        scheduled_at: scheduledAt.toISOString(),
+      });
 
-    this.logger.debug(`Follow-up scheduled for lead ${leadId} at ${scheduledAt.toISOString()}`);
+      this.logger.log(`Follow-up scheduled for lead ${leadId} at ${scheduledAt.toISOString()}`);
+    } catch (error) {
+      this.logger.error(`Error scheduling follow-up for lead ${leadId}:`, error);
+    }
   }
 }

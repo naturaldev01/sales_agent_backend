@@ -191,8 +191,6 @@ export const COUNTRY_NAME_TO_CODE: Record<string, string> = {
   'korea': 'KR',
   'china': 'CN',
   'india': 'IN',
-  'pakistan': 'PK',
-  'iran': 'IR',
   'iraq': 'IQ',
   'jordan': 'JO',
   'lebanon': 'LB',
