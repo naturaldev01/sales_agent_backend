@@ -287,8 +287,8 @@ export class OrchestratorService {
       if (data.consentGiven !== null && data.consentGiven !== undefined) {
         await this.supabase.upsertLeadProfile(data.leadId, {
           consent_given: data.consentGiven,
-          consent_at: data.consentGiven ? new Date().toISOString() : null,
-          consent_version: data.consentGiven ? '1.0' : null,
+          consent_at: data.consentGiven ? new Date().toISOString() : undefined,
+          consent_version: data.consentGiven ? '1.0' : undefined,
         });
         this.logger.log(`Consent status updated for lead ${data.leadId}: ${data.consentGiven}`);
       }
@@ -334,7 +334,7 @@ export class OrchestratorService {
         this.logger.log(`Lead ${data.leadId} is ready for doctor evaluation - all medical history collected`);
         
         // Add tag if no photos
-        const profile = lead.lead_profile;
+        const profile = lead.lead_profile as Record<string, unknown> | null;
         if (!profile || profile.photo_status !== 'complete') {
           await this.addLeadTag(data.leadId, 'NO_PHOTOS');
         }
@@ -1087,7 +1087,7 @@ export class OrchestratorService {
           status: lead.status,
           treatmentCategory: lead.treatment_category,
           desireScore: desireScore ?? lead.desire_score,
-          hasPhotos: lead.lead_profile?.photo_status === 'complete',
+          hasPhotos: (lead.lead_profile as Record<string, unknown> | null)?.photo_status === 'complete',
           profile: lead.lead_profile,
         },
         last_user_response_at: lastUserResponseAt,
