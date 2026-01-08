@@ -20,6 +20,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { AuthModule } from './modules/auth/auth.module';
 import { CommentsModule } from './modules/comments/comments.module';
 import { AiTrainingModule } from './modules/ai-training/ai-training.module';
+import { ZohoCrmModule } from './modules/zoho-crm/zoho-crm.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { AiTrainingModule } from './modules/ai-training/ai-training.module';
     AuthModule,
     CommentsModule,
     AiTrainingModule,
+    ZohoCrmModule,
   ],
 })
 export class AppModule {}

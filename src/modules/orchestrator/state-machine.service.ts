@@ -3,22 +3,26 @@ import { Injectable, Logger } from '@nestjs/common';
 /**
  * Lead Status Enum
  * 
- * Flow: NEW → QUALIFYING → PHOTO_REQUESTED → PHOTO_COLLECTING → READY_FOR_DOCTOR → READY_FOR_SALES → CONVERTED
+ * Flow (with photos): NEW → QUALIFYING → PHOTO_REQUESTED → PHOTO_COLLECTING → READY_FOR_DOCTOR → READY_FOR_SALES → CONVERTED
+ * Flow (without photos): NEW → QUALIFYING → READY_FOR_DOCTOR → READY_FOR_SALES → CONVERTED
  * 
  * Alternative paths:
  * - PHOTO_COLLECTING → PHOTO_QA_FIX (if photos are incomplete/poor quality)
+ * - QUALIFYING → READY_FOR_DOCTOR (if user declines photos but medical info complete)
  * - Any → HANDOFF_HUMAN (if human intervention needed)
  * - Any → WAITING_FOR_USER (if waiting for user response)
  * - WAITING_FOR_USER → DORMANT (if max follow-ups reached)
  * - Any → CLOSED (if user declines or admin closes)
+ * 
+ * Note: Photos are OPTIONAL. Lead can proceed to doctor without photos.
  */
 export type LeadStatus =
   | 'NEW'                  // Initial state - first contact
-  | 'QUALIFYING'           // Gathering initial info (treatment, concern area, timeline)
-  | 'PHOTO_REQUESTED'      // Photos have been requested
+  | 'QUALIFYING'           // Gathering initial info (treatment, concern area, timeline, medical history)
+  | 'PHOTO_REQUESTED'      // Photos have been requested (optional)
   | 'PHOTO_COLLECTING'     // Receiving photos
-  | 'PHOTO_QA_FIX'         // NEW: Photos received but need fixes (incomplete/poor quality)
-  | 'READY_FOR_DOCTOR'     // All info collected, ready for doctor evaluation
+  | 'PHOTO_QA_FIX'         // Photos received but need fixes (incomplete/poor quality)
+  | 'READY_FOR_DOCTOR'     // All medical info collected, ready for doctor (photos optional)
   | 'READY_FOR_SALES'      // Doctor approved, waiting for sales to create offer
   | 'WAITING_FOR_USER'     // Waiting for user to respond
   | 'DORMANT'              // User hasn't responded after max follow-ups
@@ -33,9 +37,11 @@ export type LeadEvent =
   | 'MESSAGE_RECEIVED'        // User sent a message
   | 'PHOTO_RECEIVED'          // User sent a photo
   | 'QUALIFYING_COMPLETE'     // Qualifying phase done, ready for photos
+  | 'MEDICAL_COMPLETE'        // All medical questions answered (can go to doctor without photos)
   | 'PHOTOS_COMPLETE'         // All required photos received and validated
-  | 'PHOTOS_NEED_FIX'         // NEW: Photos received but need fixes
-  | 'PHOTOS_FIXED'            // NEW: Fixed photos received
+  | 'PHOTOS_DECLINED'         // User explicitly declined to send photos
+  | 'PHOTOS_NEED_FIX'         // Photos received but need fixes
+  | 'PHOTOS_FIXED'            // Fixed photos received
   | 'FOLLOWUP_SENT'           // Follow-up message sent
   | 'MAX_FOLLOWUPS_REACHED'   // No response after max follow-ups
   | 'HANDOFF_REQUESTED'       // Human handoff requested
@@ -57,6 +63,8 @@ interface StateContext {
     status: LeadStatus;
     treatment_category?: string;
     desire_score?: number;
+    consent_given?: boolean;
+    photo_status?: 'pending' | 'declined' | 'partial' | 'complete';
   };
   conversation?: {
     message_count: number;
@@ -67,6 +75,10 @@ interface StateContext {
     required: number;
     hasQualityIssues?: boolean;
     missingAngles?: string[];
+  };
+  medical?: {
+    isComplete: boolean;
+    missingFields?: string[];
   };
   followups?: {
     sent: number;
@@ -109,7 +121,7 @@ export class StateMachineService {
       event: 'MESSAGE_RECEIVED',
     },
 
-    // Qualifying complete, request photos
+    // Qualifying complete, request photos (optional path)
     {
       from: ['QUALIFYING'],
       to: 'PHOTO_REQUESTED',
@@ -118,12 +130,47 @@ export class StateMachineService {
     },
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PHOTO COLLECTION FLOW
+    // PHOTO-OPTIONAL FLOW (NEW - Photos are not required)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Medical info complete without photos -> Ready for doctor
+    {
+      from: ['QUALIFYING'],
+      to: 'READY_FOR_DOCTOR',
+      event: 'MEDICAL_COMPLETE',
+      condition: (ctx) => ctx.medical?.isComplete === true,
+    },
+
+    // User declines photos but has medical info -> Ready for doctor
+    {
+      from: ['QUALIFYING', 'PHOTO_REQUESTED'],
+      to: 'READY_FOR_DOCTOR',
+      event: 'PHOTOS_DECLINED',
+      condition: (ctx) => ctx.medical?.isComplete === true,
+    },
+
+    // User declines photos but medical not complete -> Stay in qualifying
+    {
+      from: ['PHOTO_REQUESTED'],
+      to: 'QUALIFYING',
+      event: 'PHOTOS_DECLINED',
+      condition: (ctx) => ctx.medical?.isComplete !== true,
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PHOTO COLLECTION FLOW (for users who choose to send photos)
     // ═══════════════════════════════════════════════════════════════════════
 
     // First photo received after request
     {
       from: ['PHOTO_REQUESTED'],
+      to: 'PHOTO_COLLECTING',
+      event: 'PHOTO_RECEIVED',
+    },
+
+    // Photo received during qualifying (user sends without being asked)
+    {
+      from: ['QUALIFYING'],
       to: 'PHOTO_COLLECTING',
       event: 'PHOTO_RECEIVED',
     },
@@ -171,6 +218,14 @@ export class StateMachineService {
       to: 'READY_FOR_DOCTOR',
       event: 'PHOTOS_COMPLETE',
       condition: (ctx) => ctx.photos!.count >= ctx.photos!.required,
+    },
+
+    // Medical complete while collecting photos -> Ready for doctor
+    {
+      from: ['PHOTO_COLLECTING'],
+      to: 'READY_FOR_DOCTOR',
+      event: 'MEDICAL_COMPLETE',
+      condition: (ctx) => ctx.medical?.isComplete === true,
     },
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -346,11 +401,11 @@ export class StateMachineService {
   getStateDescription(status: LeadStatus): string {
     const descriptions: Record<LeadStatus, string> = {
       'NEW': 'New lead - initial contact',
-      'QUALIFYING': 'Gathering information (treatment, concerns, timeline)',
-      'PHOTO_REQUESTED': 'Waiting for user to send photos',
+      'QUALIFYING': 'Gathering information (treatment, concerns, timeline, medical history)',
+      'PHOTO_REQUESTED': 'Photos requested (optional)',
       'PHOTO_COLLECTING': 'Receiving and validating photos',
       'PHOTO_QA_FIX': 'Photos need fixes (quality issues or missing angles)',
-      'READY_FOR_DOCTOR': 'All info collected, ready for doctor evaluation',
+      'READY_FOR_DOCTOR': 'All medical info collected, ready for doctor (photos optional)',
       'READY_FOR_SALES': 'Doctor approved, waiting for sales offer',
       'WAITING_FOR_USER': 'Waiting for user to respond',
       'DORMANT': 'User inactive after multiple follow-ups',
@@ -359,5 +414,19 @@ export class StateMachineService {
       'CLOSED': 'Lead closed',
     };
     return descriptions[status] || 'Unknown status';
+  }
+
+  /**
+   * Check if lead can proceed to doctor without photos
+   */
+  canProceedWithoutPhotos(context: StateContext): boolean {
+    return context.medical?.isComplete === true;
+  }
+
+  /**
+   * Check if lead has any photos
+   */
+  hasPhotos(context: StateContext): boolean {
+    return (context.photos?.count ?? 0) > 0;
   }
 }

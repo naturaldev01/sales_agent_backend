@@ -228,6 +228,13 @@ export class OrchestratorService {
     readyForDoctor?: boolean;
     agentName?: string;  // Virtual agent name for greeting
     isGreeting?: boolean;  // Flag to indicate greeting response
+    consentGiven?: boolean | null;  // KVKK consent status
+    photoStatus?: string;  // Photo collection status
+    sentiment?: {  // Sentiment analysis results
+      mood?: string;
+      toxicity?: boolean;
+      toxicity_reason?: string | null;
+    };
   }): Promise<void> {
     this.logger.log(`Processing AI response for lead: ${data.leadId}`);
 
@@ -237,10 +244,28 @@ export class OrchestratorService {
         throw new Error(`Lead not found: ${data.leadId}`);
       }
 
+      // Check for toxicity - trigger handoff if detected
+      if (data.sentiment?.toxicity) {
+        this.logger.warn(`Toxicity detected for lead ${data.leadId}: ${data.sentiment.toxicity_reason}`);
+        await this.handleHandoff(
+          data.leadId, 
+          data.conversationId, 
+          `toxicity:${data.sentiment.toxicity_reason || 'detected'}`
+        );
+        return;
+      }
+
       // Check for handoff
       if (data.shouldHandoff) {
         await this.handleHandoff(data.leadId, data.conversationId, data.handoffReason || 'ai_recommendation');
         return;
+      }
+
+      // Check for angry sentiment - might need handoff
+      if (data.sentiment?.mood === 'angry') {
+        this.logger.warn(`Angry sentiment detected for lead ${data.leadId}`);
+        // Add tag but don't automatically handoff - let AI try to resolve first
+        await this.addLeadTag(data.leadId, 'ANGRY_USER');
       }
 
       // Update lead with extracted data
@@ -256,6 +281,24 @@ export class OrchestratorService {
           agent_name: data.agentName,
         });
         this.logger.log(`Agent name saved for lead ${data.leadId}: ${data.agentName}`);
+      }
+
+      // Update consent status
+      if (data.consentGiven !== null && data.consentGiven !== undefined) {
+        await this.supabase.upsertLeadProfile(data.leadId, {
+          consent_given: data.consentGiven,
+          consent_at: data.consentGiven ? new Date().toISOString() : null,
+          consent_version: data.consentGiven ? '1.0' : null,
+        });
+        this.logger.log(`Consent status updated for lead ${data.leadId}: ${data.consentGiven}`);
+      }
+
+      // Update photo status
+      if (data.photoStatus) {
+        await this.supabase.upsertLeadProfile(data.leadId, {
+          photo_status: data.photoStatus,
+        });
+        this.logger.log(`Photo status updated for lead ${data.leadId}: ${data.photoStatus}`);
       }
 
       if (data.extraction) {
@@ -285,10 +328,16 @@ export class OrchestratorService {
         }
       }
 
-      // Check if ready for doctor evaluation (all medical history collected)
+      // Check if ready for doctor evaluation (all medical history collected - photos optional)
       if (data.readyForDoctor) {
         updateData.status = 'READY_FOR_DOCTOR';
         this.logger.log(`Lead ${data.leadId} is ready for doctor evaluation - all medical history collected`);
+        
+        // Add tag if no photos
+        const profile = lead.lead_profile;
+        if (!profile || profile.photo_status !== 'complete') {
+          await this.addLeadTag(data.leadId, 'NO_PHOTOS');
+        }
       }
 
       if (Object.keys(updateData).length > 0) {
@@ -349,8 +398,13 @@ export class OrchestratorService {
         this.logger.log(`${messageParts.length} message part(s) queued for sending: ${replyMessage.id}`);
       }
 
-      // Schedule follow-up if needed
-      await this.scheduleFollowupIfNeeded(data.leadId, data.conversationId);
+      // Schedule AI-driven follow-up
+      await this.scheduleAiDrivenFollowup(
+        data.leadId, 
+        data.conversationId, 
+        lead.language || 'en',
+        data.desireScore,
+      );
 
     } catch (error) {
       this.logger.error('Error processing AI response:', error);
@@ -358,8 +412,30 @@ export class OrchestratorService {
     }
   }
 
+  /**
+   * Add a tag to a lead (for tracking purposes)
+   */
+  private async addLeadTag(leadId: string, tag: string): Promise<void> {
+    try {
+      const lead = await this.supabase.getLeadById(leadId);
+      if (!lead) return;
+      
+      const currentTags: string[] = (lead as any).tags || [];
+      if (!currentTags.includes(tag)) {
+        const newTags = [...currentTags, tag];
+        await this.supabase.updateLead(leadId, { tags: newTags });
+        this.logger.log(`Tag '${tag}' added to lead ${leadId}`);
+      }
+    } catch (error) {
+      this.logger.error(`Error adding tag to lead ${leadId}:`, error);
+    }
+  }
+
   private mapExtractionToProfile(extraction: Record<string, unknown>): Record<string, unknown> {
     const mapping: Record<string, string> = {
+      // Consent
+      consent_given: 'consent_given',
+      
       // Personal info
       name: 'name',
       phone: 'phone',
@@ -383,31 +459,66 @@ export class OrchestratorService {
       allergies_detail: 'allergies_detail',
       has_chronic_disease: 'has_chronic_disease',
       chronic_disease_detail: 'chronic_disease_detail',
+      has_blood_disease: 'has_blood_disease',
+      blood_disease_detail: 'blood_disease_detail',
+      uses_blood_thinners: 'uses_blood_thinners',
+      blood_thinner_detail: 'blood_thinner_detail',
       has_previous_surgery: 'has_previous_surgery',
       previous_surgery_detail: 'previous_surgery_detail',
+      has_previous_hair_transplant: 'has_previous_hair_transplant',
+      previous_hair_transplant_detail: 'previous_hair_transplant_detail',
+      current_medications: 'current_medications',
       alcohol_use: 'alcohol_use',
       smoking_use: 'smoking_use',
+      
+      // Photo intent
+      photo_declined: 'photo_declined',
+      photo_promised: 'photo_promised',
       
       // Language
       language: 'language_preference',
       detected_language: 'language_preference',
     };
 
+    // Boolean fields that need conversion
+    const booleanFields = [
+      'consent_given',
+      'has_allergies', 
+      'has_chronic_disease', 
+      'has_blood_disease',
+      'uses_blood_thinners',
+      'has_previous_surgery',
+      'has_previous_hair_transplant',
+      'photo_declined',
+      'photo_promised',
+    ];
+
     const profile: Record<string, unknown> = {};
     
     for (const [key, value] of Object.entries(extraction)) {
       if (mapping[key] && value !== null && value !== undefined) {
         // Convert yes/no strings to booleans for boolean fields
-        if (['has_allergies', 'has_chronic_disease', 'has_previous_surgery'].includes(key)) {
+        if (booleanFields.includes(key)) {
           if (typeof value === 'string') {
-            profile[mapping[key]] = value.toLowerCase() === 'yes';
+            profile[mapping[key]] = value.toLowerCase() === 'yes' || value.toLowerCase() === 'true';
           } else {
             profile[mapping[key]] = Boolean(value);
           }
         } else {
-        profile[mapping[key]] = value;
+          profile[mapping[key]] = value;
         }
       }
+    }
+
+    // Handle consent timestamp
+    if (profile.consent_given === true && !extraction.consent_at) {
+      profile.consent_at = new Date().toISOString();
+      profile.consent_version = '1.0';
+    }
+
+    // Handle photo_status based on extraction
+    if (extraction.photo_declined === true) {
+      profile.photo_status = 'declined';
     }
 
     return profile;
@@ -925,6 +1036,125 @@ export class OrchestratorService {
       this.logger.log(`Follow-up scheduled for lead ${leadId} at ${scheduledAt.toISOString()}`);
     } catch (error) {
       this.logger.error(`Error scheduling follow-up for lead ${leadId}:`, error);
+    }
+  }
+
+  /**
+   * AI-driven follow-up scheduling
+   * Calls the AI to analyze the conversation and determine optimal follow-up timing
+   */
+  private async scheduleAiDrivenFollowup(
+    leadId: string, 
+    conversationId: string,
+    language: string,
+    desireScore?: number,
+  ): Promise<void> {
+    try {
+      // Cancel any existing pending follow-ups
+      await this.supabase.cancelPendingFollowups(leadId);
+
+      // Get AI Python service URL
+      const aiServiceUrl = this.configService.get<string>('AI_SERVICE_URL', 'http://localhost:8001');
+      
+      // Get conversation history
+      const messages = await this.supabase.getConversationMessages(conversationId, 15);
+      
+      // Get lead context
+      const lead = await this.supabase.getLeadById(leadId);
+      if (!lead) {
+        this.logger.error(`Lead not found for follow-up scheduling: ${leadId}`);
+        return;
+      }
+
+      // Count previous follow-ups
+      const previousFollowups = await this.supabase.getFollowupCount(leadId);
+      
+      // Get last user response time
+      const lastUserMessage = messages
+        .filter((m: any) => m.direction === 'in')
+        .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+      
+      const lastUserResponseAt = lastUserMessage?.created_at;
+
+      // Call AI service for follow-up analysis
+      const response = await axios.post(`${aiServiceUrl}/api/v1/analyze-followup`, {
+        messages: messages.map((m: any) => ({
+          role: m.direction === 'in' ? 'user' : 'assistant',
+          content: m.content,
+        })),
+        language,
+        lead_context: {
+          status: lead.status,
+          treatmentCategory: lead.treatment_category,
+          desireScore: desireScore ?? lead.desire_score,
+          hasPhotos: lead.lead_profile?.photo_status === 'complete',
+          profile: lead.lead_profile,
+        },
+        last_user_response_at: lastUserResponseAt,
+        followup_count: previousFollowups,
+      });
+
+      const result = response.data;
+      
+      this.logger.log(`AI follow-up analysis for lead ${leadId}:`, {
+        strategy: result.followup_strategy,
+        shouldFollowup: result.should_followup,
+        waitHours: result.wait_hours,
+        confidence: result.confidence,
+      });
+
+      // Handle different strategies
+      if (result.followup_strategy === 'give_up') {
+        this.logger.log(`AI decided to give up follow-ups for lead ${leadId}: ${result.reasoning}`);
+        return; // Don't schedule any follow-up
+      }
+
+      if (result.followup_strategy === 'escalate') {
+        this.logger.log(`AI escalating lead ${leadId} to human: ${result.escalation_reason}`);
+        await this.handleHandoff(leadId, conversationId, result.escalation_reason || 'ai_escalation');
+        return;
+      }
+
+      if (!result.should_followup) {
+        this.logger.log(`AI decided no follow-up needed for lead ${leadId}: ${result.reasoning}`);
+        return;
+      }
+
+      // Calculate scheduled time
+      const scheduledAt = new Date();
+      if (result.followup_strategy === 'immediate') {
+        // Schedule for 1 hour from now (give some buffer)
+        scheduledAt.setHours(scheduledAt.getHours() + 1);
+      } else if (result.wait_hours) {
+        scheduledAt.setHours(scheduledAt.getHours() + result.wait_hours);
+      } else {
+        // Default to 24 hours
+        scheduledAt.setHours(scheduledAt.getHours() + 24);
+      }
+
+      // Create follow-up with AI analysis data
+      await this.supabase.createFollowup({
+        lead_id: leadId,
+        conversation_id: conversationId,
+        followup_type: result.followup_tone || 'reminder',
+        attempt_number: previousFollowups + 1,
+        scheduled_at: scheduledAt.toISOString(),
+        followup_strategy: result.followup_strategy,
+        suggested_message: result.suggested_message,
+        reasoning: result.reasoning,
+        ai_confidence: result.confidence,
+      });
+
+      this.logger.log(
+        `AI-driven follow-up scheduled for lead ${leadId} at ${scheduledAt.toISOString()} ` +
+        `(strategy: ${result.followup_strategy}, tone: ${result.followup_tone})`
+      );
+
+    } catch (error) {
+      this.logger.error(`Error scheduling AI-driven follow-up for lead ${leadId}:`, error);
+      
+      // Fallback to simple scheduling if AI service fails
+      await this.scheduleFollowupIfNeeded(leadId, conversationId);
     }
   }
 }

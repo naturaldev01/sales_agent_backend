@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException, Inject, forwardRef } from '@nestjs/common';
 import {
   SupabaseService,
   Lead,
@@ -6,6 +6,7 @@ import {
   PhotoAsset,
   PhotoChecklist,
 } from '../../common/supabase/supabase.service';
+import { ZohoCrmService } from '../zoho-crm/zoho-crm.service';
 
 export interface LeadWithProfile extends Lead {
   lead_profile?: LeadProfile | null;
@@ -19,6 +20,7 @@ export interface SalesPriceDto {
   estimated_price_min: number;
   estimated_price_max: number;
   price_currency: string;
+  sync_to_zoho?: boolean;  // Optional flag to trigger CRM sync
 }
 
 export interface DoctorComment {
@@ -37,7 +39,11 @@ export interface DoctorComment {
 export class LeadsService {
   private readonly logger = new Logger(LeadsService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    @Inject(forwardRef(() => ZohoCrmService))
+    private readonly zohoCrmService: ZohoCrmService,
+  ) {}
 
   async findAll(options: {
     status?: string;
@@ -281,13 +287,13 @@ export class LeadsService {
 
   /**
    * Sales agent submits price for a lead
-   * Status remains READY_FOR_SALES until converted
+   * Status changes to SALES_PRICED and optionally syncs to Zoho CRM
    */
   async submitSalesPrice(
     leadId: string,
     salesAgentId: string,
     dto: SalesPriceDto,
-  ): Promise<LeadWithProfile> {
+  ): Promise<LeadWithProfile & { zohoSync?: { success: boolean; zohoLeadId?: string; error?: string } }> {
     const lead = await this.findById(leadId);
 
     // Validate lead is in correct status
@@ -305,8 +311,9 @@ export class LeadsService {
       throw new BadRequestException('Minimum price cannot be greater than maximum price');
     }
 
-    // Update lead with price information
+    // Update lead with price information and change status to SALES_PRICED
     await this.supabase.updateLead(leadId, {
+      status: 'SALES_PRICED',
       estimated_price_min: dto.estimated_price_min,
       estimated_price_max: dto.estimated_price_max,
       price_currency: dto.price_currency,
@@ -316,7 +323,36 @@ export class LeadsService {
 
     this.logger.log(`Sales price submitted for lead ${leadId} by agent ${salesAgentId}`);
 
-    return this.findById(leadId);
+    // Get updated lead
+    const updatedLead = await this.findById(leadId);
+
+    // Sync to Zoho CRM if requested or by default
+    let zohoSync: { success: boolean; zohoLeadId?: string; error?: string } | undefined;
+    
+    if (dto.sync_to_zoho !== false) {
+      try {
+        const syncResult = await this.zohoCrmService.syncLeadToZoho(leadId);
+        zohoSync = {
+          success: syncResult.success,
+          zohoLeadId: syncResult.zohoLeadId,
+          error: syncResult.error,
+        };
+        
+        if (syncResult.success) {
+          this.logger.log(`Lead ${leadId} synced to Zoho CRM: ${syncResult.zohoLeadId}`);
+        } else {
+          this.logger.warn(`Zoho CRM sync failed for lead ${leadId}: ${syncResult.error}`);
+        }
+      } catch (error: any) {
+        this.logger.error(`Error syncing lead ${leadId} to Zoho CRM:`, error.message);
+        zohoSync = {
+          success: false,
+          error: error.message,
+        };
+      }
+    }
+
+    return { ...updatedLead, zohoSync };
   }
 
   /**

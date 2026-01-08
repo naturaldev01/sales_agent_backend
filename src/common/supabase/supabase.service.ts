@@ -114,6 +114,7 @@ export class SupabaseService implements OnModuleInit {
     treatment_category: string;
     desire_score: number;
     metadata: Record<string, unknown>;
+    tags: string[];
     // Doctor approval fields
     doctor_approved_by: string;
     doctor_approved_at: string;
@@ -126,38 +127,42 @@ export class SupabaseService implements OnModuleInit {
     sales_price_set_at: string;
     // Timezone field
     timezone: string;
+    // Zoho CRM fields
+    zoho_lead_id: string;
+    zoho_synced_at: string;
+    zoho_sync_error: string;
+    zoho_sync_attempted_at: string;
   }>): Promise<Lead> {
-    const updateData: LeadUpdate = {
-      status: data.status,
-      language: data.language,
-      country: data.country,
-      treatment_category: data.treatment_category,
-      desire_score: data.desire_score,
-      metadata: data.metadata as Json,
-      // Doctor approval fields
-      doctor_approved_by: data.doctor_approved_by,
-      doctor_approved_at: data.doctor_approved_at,
-      treatment_recommendations: data.treatment_recommendations,
-      // Sales price fields
-      estimated_price_min: data.estimated_price_min,
-      estimated_price_max: data.estimated_price_max,
-      price_currency: data.price_currency,
-      sales_price_set_by: data.sales_price_set_by,
-      sales_price_set_at: data.sales_price_set_at,
-      // Timezone field
-      timezone: data.timezone,
-    };
+    const updateData: Record<string, unknown> = {};
     
-    // Remove undefined values
-    Object.keys(updateData).forEach(key => {
-      if (updateData[key as keyof LeadUpdate] === undefined) {
-        delete updateData[key as keyof LeadUpdate];
-      }
-    });
+    if (data.status !== undefined) updateData.status = data.status;
+    if (data.language !== undefined) updateData.language = data.language;
+    if (data.country !== undefined) updateData.country = data.country;
+    if (data.treatment_category !== undefined) updateData.treatment_category = data.treatment_category;
+    if (data.desire_score !== undefined) updateData.desire_score = data.desire_score;
+    if (data.metadata !== undefined) updateData.metadata = data.metadata;
+    if (data.tags !== undefined) updateData.tags = data.tags;
+    // Doctor approval fields
+    if (data.doctor_approved_by !== undefined) updateData.doctor_approved_by = data.doctor_approved_by;
+    if (data.doctor_approved_at !== undefined) updateData.doctor_approved_at = data.doctor_approved_at;
+    if (data.treatment_recommendations !== undefined) updateData.treatment_recommendations = data.treatment_recommendations;
+    // Sales price fields
+    if (data.estimated_price_min !== undefined) updateData.estimated_price_min = data.estimated_price_min;
+    if (data.estimated_price_max !== undefined) updateData.estimated_price_max = data.estimated_price_max;
+    if (data.price_currency !== undefined) updateData.price_currency = data.price_currency;
+    if (data.sales_price_set_by !== undefined) updateData.sales_price_set_by = data.sales_price_set_by;
+    if (data.sales_price_set_at !== undefined) updateData.sales_price_set_at = data.sales_price_set_at;
+    // Timezone field
+    if (data.timezone !== undefined) updateData.timezone = data.timezone;
+    // Zoho CRM fields
+    if (data.zoho_lead_id !== undefined) updateData.zoho_lead_id = data.zoho_lead_id;
+    if (data.zoho_synced_at !== undefined) updateData.zoho_synced_at = data.zoho_synced_at;
+    if (data.zoho_sync_error !== undefined) updateData.zoho_sync_error = data.zoho_sync_error;
+    if (data.zoho_sync_attempted_at !== undefined) updateData.zoho_sync_attempted_at = data.zoho_sync_attempted_at;
     
     const { data: lead, error } = await this.supabase
       .from('leads')
-      .update(updateData)
+      .update(updateData as LeadUpdate)
       .eq('id', id)
       .select()
       .single();
@@ -356,15 +361,31 @@ export class SupabaseService implements OnModuleInit {
     has_previous_treatment: string;
     urgency: string;
     budget_mentioned: string;
+    
+    // Consent fields
     consent_given: boolean;
+    consent_at: string;
+    consent_version: string;
+    
+    // Photo status
+    photo_status: string;
+    photo_declined: boolean;
+    photo_promised: boolean;
     
     // Medical history
     has_allergies: boolean;
     allergies_detail: string;
     has_chronic_disease: boolean;
     chronic_disease_detail: string;
+    has_blood_disease: boolean;
+    blood_disease_detail: string;
+    uses_blood_thinners: boolean;
+    blood_thinner_detail: string;
     has_previous_surgery: boolean;
     previous_surgery_detail: string;
+    has_previous_hair_transplant: boolean;
+    previous_hair_transplant_detail: string;
+    current_medications: string;
     alcohol_use: string;
     smoking_use: string;
     
@@ -397,13 +418,29 @@ export class SupabaseService implements OnModuleInit {
     if (data.budget_mentioned !== undefined) upsertData.budget_mentioned = data.budget_mentioned;
     if (data.consent_given !== undefined) upsertData.consent_given = data.consent_given;
     
+    // Consent fields
+    if (data.consent_at !== undefined) upsertData.consent_at = data.consent_at;
+    if (data.consent_version !== undefined) upsertData.consent_version = data.consent_version;
+    
+    // Photo status
+    if (data.photo_status !== undefined) upsertData.photo_status = data.photo_status;
+    if (data.photo_declined !== undefined) upsertData.photo_declined = data.photo_declined;
+    if (data.photo_promised !== undefined) upsertData.photo_promised = data.photo_promised;
+    
     // Medical history
     if (data.has_allergies !== undefined) upsertData.has_allergies = data.has_allergies;
     if (data.allergies_detail !== undefined) upsertData.allergies_detail = data.allergies_detail;
     if (data.has_chronic_disease !== undefined) upsertData.has_chronic_disease = data.has_chronic_disease;
     if (data.chronic_disease_detail !== undefined) upsertData.chronic_disease_detail = data.chronic_disease_detail;
+    if (data.has_blood_disease !== undefined) upsertData.has_blood_disease = data.has_blood_disease;
+    if (data.blood_disease_detail !== undefined) upsertData.blood_disease_detail = data.blood_disease_detail;
+    if (data.uses_blood_thinners !== undefined) upsertData.uses_blood_thinners = data.uses_blood_thinners;
+    if (data.blood_thinner_detail !== undefined) upsertData.blood_thinner_detail = data.blood_thinner_detail;
     if (data.has_previous_surgery !== undefined) upsertData.has_previous_surgery = data.has_previous_surgery;
     if (data.previous_surgery_detail !== undefined) upsertData.previous_surgery_detail = data.previous_surgery_detail;
+    if (data.has_previous_hair_transplant !== undefined) upsertData.has_previous_hair_transplant = data.has_previous_hair_transplant;
+    if (data.previous_hair_transplant_detail !== undefined) upsertData.previous_hair_transplant_detail = data.previous_hair_transplant_detail;
+    if (data.current_medications !== undefined) upsertData.current_medications = data.current_medications;
     if (data.alcohol_use !== undefined) upsertData.alcohol_use = data.alcohol_use;
     if (data.smoking_use !== undefined) upsertData.smoking_use = data.smoking_use;
     
@@ -482,8 +519,14 @@ export class SupabaseService implements OnModuleInit {
     followup_type: string;
     attempt_number: number;
     scheduled_at: string;
+    // AI-driven follow-up fields
+    followup_strategy?: string;
+    suggested_message?: string;
+    reasoning?: string;
+    ai_confidence?: number;
+    escalation_reason?: string;
   }): Promise<Followup> {
-    const insertData: FollowupInsert = {
+    const insertData: Record<string, unknown> = {
       lead_id: data.lead_id,
       conversation_id: data.conversation_id,
       followup_type: data.followup_type,
@@ -491,14 +534,34 @@ export class SupabaseService implements OnModuleInit {
       scheduled_at: data.scheduled_at,
     };
     
+    // AI-driven fields
+    if (data.followup_strategy !== undefined) insertData.followup_strategy = data.followup_strategy;
+    if (data.suggested_message !== undefined) insertData.suggested_message = data.suggested_message;
+    if (data.reasoning !== undefined) insertData.reasoning = data.reasoning;
+    if (data.ai_confidence !== undefined) insertData.ai_confidence = data.ai_confidence;
+    if (data.escalation_reason !== undefined) insertData.escalation_reason = data.escalation_reason;
+    
     const { data: followup, error } = await this.supabase
       .from('followups')
-      .insert(insertData)
+      .insert(insertData as FollowupInsert)
       .select()
       .single();
 
     if (error) throw error;
     return followup!;
+  }
+  
+  /**
+   * Get total count of follow-ups for a lead
+   */
+  async getFollowupCount(leadId: string): Promise<number> {
+    const { count, error } = await this.supabase
+      .from('followups')
+      .select('*', { count: 'exact', head: true })
+      .eq('lead_id', leadId);
+
+    if (error) throw error;
+    return count || 0;
   }
 
   async getPendingFollowups(): Promise<(Followup & { leads: Lead | null; conversations: Conversation | null })[]> {
@@ -795,6 +858,43 @@ export class SupabaseService implements OnModuleInit {
 
     if (error && error.code !== 'PGRST116') throw error;
     return data?.template_image_path || null;
+  }
+
+  // ==================== ZOHO CRM ====================
+
+  async getZohoLeadId(leadId: string): Promise<string | null> {
+    const { data, error } = await this.supabase
+      .from('leads')
+      .select('zoho_lead_id')
+      .eq('id', leadId)
+      .single();
+
+    if (error && error.code !== 'PGRST116') throw error;
+    return (data as any)?.zoho_lead_id || null;
+  }
+
+  async logZohoSyncError(leadId: string, errorMessage: string): Promise<void> {
+    await this.supabase
+      .from('leads')
+      .update({
+        zoho_sync_error: errorMessage,
+        zoho_sync_attempted_at: new Date().toISOString(),
+      } as any)
+      .eq('id', leadId);
+  }
+
+  async getLeadsWithFailedZohoSync(): Promise<Lead[]> {
+    const { data, error } = await this.supabase
+      .from('leads')
+      .select('*')
+      .in('status', ['DOCTOR_APPROVED', 'SALES_PRICED'])
+      .not('zoho_sync_error', 'is', null)
+      .is('zoho_lead_id', null)
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) throw error;
+    return data || [];
   }
 
   // ==================== SYSTEM CONFIGS ====================
