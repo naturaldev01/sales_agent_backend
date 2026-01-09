@@ -15,6 +15,8 @@ import { NormalizedMessage } from '../webhooks/interfaces/normalized-message.int
 import { PhotosService } from '../photos/photos.service';
 import { PhotoAnalyzerService } from '../photos/photo-analyzer.service';
 import { DoctorNotificationsService } from '../notifications/doctor-notifications.service';
+import { TelegramAdapter } from '../webhooks/adapters/telegram.adapter';
+import { WhatsappAdapter } from '../webhooks/adapters/whatsapp.adapter';
 
 @Injectable()
 export class OrchestratorService {
@@ -47,6 +49,10 @@ export class OrchestratorService {
     private readonly photoAnalyzer: PhotoAnalyzerService,
     @Inject(forwardRef(() => DoctorNotificationsService))
     private readonly doctorNotifications: DoctorNotificationsService,
+    @Inject(forwardRef(() => TelegramAdapter))
+    private readonly telegramAdapter: TelegramAdapter,
+    @Inject(forwardRef(() => WhatsappAdapter))
+    private readonly whatsappAdapter: WhatsappAdapter,
   ) {
     this.telegramBotToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN', '');
     this.kvkkLinkUrl = this.configService.get<string>('KVKK_LINK_URL', 'https://naturalclinic.com/kvkk');
@@ -127,24 +133,85 @@ export class OrchestratorService {
         }
       }
 
-      // 5. Handle state transition
+      // Get current status
       const currentStatus = lead.status as LeadStatus;
+
+      // 4.6 Update lead language if detected from message (do this early)
+      const detectedLanguage = message.senderLanguage;
+      if (detectedLanguage && detectedLanguage !== lead.language) {
+        await this.supabase.updateLead(lead.id, { language: detectedLanguage });
+        this.logger.log(`Lead language updated to: ${detectedLanguage}`);
+      }
+      const messageLanguage = detectedLanguage || lead.language || 'en';
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 4.7 KVKK CONSENT CHECK - Must happen BEFORE any AI processing
+      // ═══════════════════════════════════════════════════════════════════════
+      
+      // Check if this is a NEW lead that needs KVKK consent
+      if (currentStatus === 'NEW' && !lead.lead_profile?.consent_given) {
+        this.logger.log(`New lead ${lead.id} needs KVKK consent - sending consent message`);
+        
+        // Send KVKK consent message with buttons
+        await this.sendKvkkConsentMessage(lead);
+        
+        // Update status to waiting consent
+        await this.supabase.updateLead(lead.id, { status: 'WAITING_CONSENT' });
+        this.logger.log(`Lead ${lead.id} status updated to WAITING_CONSENT`);
+        
+        // Don't queue AI job - wait for consent response
+        return;
+      }
+
+      // Check if lead is waiting for consent
+      if (currentStatus === 'WAITING_CONSENT') {
+        // Check if user is trying to give consent via text (e.g., "evet", "yes", "onaylıyorum")
+        const consentKeywords = ['evet', 'yes', 'onaylıyorum', 'kabul', 'accept', 'tamam', 'ok', 'okay', 'onay'];
+        const declineKeywords = ['hayır', 'no', 'reddet', 'istemiyorum', 'decline', 'reject'];
+        
+        const lowerContent = (message.content || '').toLowerCase().trim();
+        
+        if (consentKeywords.some(kw => lowerContent.includes(kw))) {
+          // User gave consent via text
+          this.logger.log(`Lead ${lead.id} gave consent via text message`);
+          await this.handleConsentResponse(lead.id, conversation.id, true, lead);
+          return;
+        }
+        
+        if (declineKeywords.some(kw => lowerContent.includes(kw))) {
+          // User declined consent via text
+          this.logger.log(`Lead ${lead.id} declined consent via text message`);
+          await this.handleConsentResponse(lead.id, conversation.id, false, lead);
+          return;
+        }
+        
+        // User sent something else while waiting for consent - remind them
+        const reminderMessages: Record<string, string> = {
+          tr: 'Devam edebilmemiz için KVKK onayınıza ihtiyacımız var. Lütfen yukarıdaki butonu kullanarak onaylayın veya "Evet" yazın. 🙏',
+          en: 'We need your consent to continue. Please use the button above to confirm or type "Yes". 🙏',
+          ar: 'نحتاج موافقتك للمتابعة. يرجى استخدام الزر أعلاه للتأكيد أو اكتب "نعم". 🙏',
+          fr: 'Nous avons besoin de votre consentement pour continuer. Veuillez utiliser le bouton ci-dessus ou tapez "Oui". 🙏',
+        };
+        
+        await this.queueService.addChannelSendJob({
+          channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+          channelUserId: lead.channel_user_id!,
+          content: reminderMessages[messageLanguage] || reminderMessages.en,
+        });
+        
+        this.logger.log(`Lead ${lead.id} is waiting for consent, sent reminder`);
+        return;
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // 5. Handle state transition (for non-consent states)
+      // ═══════════════════════════════════════════════════════════════════════
       const newStatus = this.determineNewStatus(currentStatus, message);
       
       if (newStatus !== currentStatus) {
         await this.supabase.updateLead(lead.id, { status: newStatus });
         this.logger.log(`Lead status updated: ${currentStatus} -> ${newStatus}`);
       }
-
-      // 5.5 Update lead language if detected from message
-      const detectedLanguage = message.senderLanguage;
-      if (detectedLanguage && detectedLanguage !== lead.language) {
-        await this.supabase.updateLead(lead.id, { language: detectedLanguage });
-        this.logger.log(`Lead language updated to: ${detectedLanguage}`);
-      }
-
-      // Use detected language or fall back to lead's stored language
-      const messageLanguage = detectedLanguage || lead.language || 'en';
 
       // 6. Queue AI processing (with debounce for photos)
       if (message.mediaType === 'image') {
@@ -157,15 +224,15 @@ export class OrchestratorService {
         );
       } else {
         // For non-photo messages, queue immediately
-      await this.queueService.addAiJob({
-        jobType: 'ANALYZE_AND_DRAFT_REPLY',
-        leadId: lead.id,
-        conversationId: conversation.id,
-        messageId: savedMessage.id,
-        language: messageLanguage,
-        contextWindow: 20,
-      });
-      this.logger.log(`AI job queued for lead: ${lead.id}`);
+        await this.queueService.addAiJob({
+          jobType: 'ANALYZE_AND_DRAFT_REPLY',
+          leadId: lead.id,
+          conversationId: conversation.id,
+          messageId: savedMessage.id,
+          language: messageLanguage,
+          contextWindow: 20,
+        });
+        this.logger.log(`AI job queued for lead: ${lead.id}`);
       }
 
     } catch (error) {
@@ -815,25 +882,182 @@ export class OrchestratorService {
   /**
    * Send KVKK consent message with buttons
    * Called for new leads or when consent is needed
+   * Sends directly via channel adapter (not queued)
    */
   async sendKvkkConsentMessage(
     lead: Lead & { lead_profile: LeadProfile | null },
   ): Promise<void> {
     const language = lead.language || 'en';
+    const channelUserId = lead.channel_user_id;
 
-    // Queue consent message with special flag for interactive buttons
-    await this.queueService.addChannelSendJob({
-      channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
-      channelUserId: lead.channel_user_id!,
-      content: '', // Content will be generated by adapter based on messageType
-      metadata: {
-        messageType: 'kvkk_consent',
-        kvkkLinkUrl: this.kvkkLinkUrl,
-        language,
-      },
-    });
+    if (!channelUserId) {
+      this.logger.error(`Cannot send KVKK consent - no channel_user_id for lead ${lead.id}`);
+      return;
+    }
 
-    this.logger.log(`KVKK consent message queued for lead ${lead.id}`);
+    try {
+      if (lead.channel === 'telegram') {
+        await this.telegramAdapter.sendKvkkConsentMessage(
+          channelUserId,
+          language,
+          this.kvkkLinkUrl,
+        );
+        this.logger.log(`KVKK consent message sent via Telegram for lead ${lead.id}`);
+      } else if (lead.channel === 'whatsapp') {
+        await this.whatsappAdapter.sendKvkkConsentMessage(
+          channelUserId,
+          language,
+          this.kvkkLinkUrl,
+        );
+        this.logger.log(`KVKK consent message sent via WhatsApp for lead ${lead.id}`);
+      } else {
+        // Fallback for web or other channels - use queue
+        await this.queueService.addChannelSendJob({
+          channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+          channelUserId,
+          content: '', 
+          metadata: {
+            messageType: 'kvkk_consent',
+            kvkkLinkUrl: this.kvkkLinkUrl,
+            language,
+          },
+        });
+        this.logger.log(`KVKK consent message queued for lead ${lead.id} (${lead.channel})`);
+      }
+    } catch (error) {
+      this.logger.error(`Failed to send KVKK consent message for lead ${lead.id}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Handle consent response from Telegram/WhatsApp callback button
+   * Called by webhooks service when user presses consent button
+   */
+  async handleCallbackConsentResponse(
+    channelUserId: string,
+    consentGiven: boolean,
+    language: string,
+  ): Promise<void> {
+    this.logger.log(`Handling callback consent response: ${consentGiven} for user ${channelUserId}`);
+
+    // Find lead by channel_user_id
+    const lead = await this.supabase.getLeadByChannelUser('telegram', channelUserId);
+    
+    if (!lead) {
+      this.logger.error(`Lead not found for channel_user_id: ${channelUserId}`);
+      return;
+    }
+
+    // Get or create conversation
+    let conversation = await this.supabase.getActiveConversation(lead.id);
+    if (!conversation) {
+      conversation = await this.supabase.createConversation({
+        lead_id: lead.id,
+        channel: 'telegram',
+      });
+    }
+
+    if (consentGiven) {
+      // Update consent in profile
+      await this.supabase.upsertLeadProfile(lead.id, {
+        consent_given: true,
+        consent_at: new Date().toISOString(),
+        consent_version: '1.0',
+      });
+
+      // Update lead status
+      await this.supabase.updateLead(lead.id, { 
+        status: 'QUALIFYING',
+        language: language || lead.language || undefined,
+      });
+
+      this.logger.log(`Consent given by lead ${lead.id}, sending flow selection`);
+
+      // Send flow selection message (Form vs Chat) via adapter
+      await this.telegramAdapter.sendFlowSelectionMessage(
+        channelUserId,
+        language || lead.language || 'en',
+        `${this.patientFormUrl}?lead_id=${lead.id}&lang=${language || lead.language || 'en'}`,
+      );
+    } else {
+      // User declined consent - stay in WAITING_CONSENT but allow general chat
+      await this.supabase.upsertLeadProfile(lead.id, {
+        consent_given: false,
+      });
+
+      // Send decline message
+      const declineMessages: Record<string, string> = {
+        tr: 'Anlıyoruz. Onay olmadan kişisel bilgi toplayamıyoruz, ancak genel sorularınızı yanıtlayabiliriz. Size nasıl yardımcı olabilirim?',
+        en: 'We understand. Without consent, we cannot collect personal information, but we can answer your general questions. How can I help you?',
+        ar: 'نتفهم ذلك. بدون موافقة، لا يمكننا جمع معلومات شخصية، لكن يمكننا الإجابة على أسئلتكم العامة. كيف يمكنني مساعدتك؟',
+        fr: 'Nous comprenons. Sans consentement, nous ne pouvons pas collecter d\'informations personnelles, mais nous pouvons répondre à vos questions générales. Comment puis-je vous aider?',
+      };
+
+      await this.telegramAdapter.sendMessage({
+        channel: 'telegram',
+        channelUserId,
+        content: declineMessages[language] || declineMessages.en,
+      });
+
+      this.logger.log(`Consent declined by lead ${lead.id}`);
+    }
+  }
+
+  /**
+   * Handle flow selection from Telegram/WhatsApp callback button
+   * Called by webhooks service when user presses form/chat button
+   */
+  async handleCallbackFlowSelection(
+    channelUserId: string,
+    selectedFlow: 'form' | 'chat',
+    language: string,
+  ): Promise<void> {
+    this.logger.log(`Handling callback flow selection: ${selectedFlow} for user ${channelUserId}`);
+
+    // Find lead by channel_user_id
+    const lead = await this.supabase.getLeadByChannelUser('telegram', channelUserId);
+    
+    if (!lead) {
+      this.logger.error(`Lead not found for channel_user_id: ${channelUserId}`);
+      return;
+    }
+
+    // Save preference
+    await this.supabase.upsertLeadProfile(lead.id, {
+      preferred_flow: selectedFlow,
+    } as any);
+
+    if (selectedFlow === 'form') {
+      // Send form link via adapter (with button)
+      await this.telegramAdapter.sendFormLinkMessage(
+        channelUserId,
+        language || lead.language || 'en',
+        `${this.patientFormUrl}?lead_id=${lead.id}&lang=${language || lead.language || 'en'}`,
+      );
+
+      // Update status
+      await this.supabase.updateLead(lead.id, { status: 'WAITING_FORM' });
+      this.logger.log(`Lead ${lead.id} chose form flow, link sent`);
+    } else {
+      // Continue with chat - send greeting and start qualification
+      const chatMessages: Record<string, string> = {
+        tr: 'Harika! Sizinle sohbet ederek ilerleyelim. 😊\n\nÖncelikle, hangi tedavi hakkında bilgi almak istiyorsunuz?',
+        en: 'Great! Let\'s continue chatting. 😊\n\nFirst, which treatment are you interested in?',
+        ar: 'رائع! دعنا نتابع الدردشة. 😊\n\nأولاً، ما هو العلاج الذي تهتم به؟',
+        fr: 'Super! Continuons à discuter. 😊\n\nTout d\'abord, quel traitement vous intéresse?',
+      };
+
+      await this.telegramAdapter.sendMessage({
+        channel: 'telegram',
+        channelUserId,
+        content: chatMessages[language] || chatMessages.en,
+      });
+
+      // Update status to qualifying
+      await this.supabase.updateLead(lead.id, { status: 'QUALIFYING' });
+      this.logger.log(`Lead ${lead.id} chose chat flow, starting qualification`);
+    }
   }
 
   /**

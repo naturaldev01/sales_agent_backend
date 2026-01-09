@@ -9,6 +9,7 @@ import { AiClientModule } from '../ai-client/ai-client.module';
 import { FollowupsModule } from '../followups/followups.module';
 import { PhotosModule } from '../photos/photos.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { WebhooksModule } from '../webhooks/webhooks.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     forwardRef(() => FollowupsModule),
     forwardRef(() => PhotosModule),
     forwardRef(() => NotificationsModule),
+    forwardRef(() => WebhooksModule),
   ],
   controllers: [OrchestratorController],
   providers: [OrchestratorService, StateMachineService],

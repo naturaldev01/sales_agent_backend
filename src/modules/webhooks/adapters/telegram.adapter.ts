@@ -71,6 +71,37 @@ interface TelegramUpdate {
     };
     caption?: string;
   };
+  callback_query?: {
+    id: string;
+    from: {
+      id: number;
+      is_bot: boolean;
+      first_name: string;
+      last_name?: string;
+      username?: string;
+      language_code?: string;
+    };
+    message?: {
+      message_id: number;
+      chat: {
+        id: number;
+        type: string;
+      };
+    };
+    chat_instance: string;
+    data?: string; // Callback data from button
+  };
+}
+
+// Result type for callback query processing
+export interface CallbackQueryResult {
+  type: 'callback_query';
+  callbackQueryId: string;
+  chatId: string;
+  userId: string;
+  data: string;
+  userName?: string;
+  language?: string;
 }
 
 @Injectable()
@@ -180,6 +211,33 @@ export class TelegramAdapter {
     }
 
     return normalized;
+  }
+
+  /**
+   * Check if update contains a callback query (button press)
+   */
+  hasCallbackQuery(update: TelegramUpdate): boolean {
+    return !!update.callback_query;
+  }
+
+  /**
+   * Parse callback query from update
+   */
+  parseCallbackQuery(update: TelegramUpdate): CallbackQueryResult | null {
+    const callback = update.callback_query;
+    if (!callback) {
+      return null;
+    }
+
+    return {
+      type: 'callback_query',
+      callbackQueryId: callback.id,
+      chatId: callback.message?.chat?.id?.toString() || callback.from.id.toString(),
+      userId: callback.from.id.toString(),
+      data: callback.data || '',
+      userName: [callback.from.first_name, callback.from.last_name].filter(Boolean).join(' '),
+      language: callback.from.language_code,
+    };
   }
 
   private getMediaType(message: TelegramUpdate['message']): NormalizedMessage['mediaType'] {

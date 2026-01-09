@@ -1,20 +1,24 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WhatsappAdapter } from './adapters/whatsapp.adapter';
-import { TelegramAdapter } from './adapters/telegram.adapter';
+import { TelegramAdapter, CallbackQueryResult } from './adapters/telegram.adapter';
 import { OrchestratorService } from '../orchestrator/orchestrator.service';
 import { NormalizedMessage } from './interfaces/normalized-message.interface';
 
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
+  private readonly patientFormUrl: string;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly whatsappAdapter: WhatsappAdapter,
     private readonly telegramAdapter: TelegramAdapter,
+    @Inject(forwardRef(() => OrchestratorService))
     private readonly orchestratorService: OrchestratorService,
-  ) {}
+  ) {
+    this.patientFormUrl = this.configService.get<string>('PATIENT_FORM_URL', 'https://health-form-six.vercel.app');
+  }
 
   // ==================== WHATSAPP ====================
 
@@ -69,6 +73,15 @@ export class WebhooksService {
     }
 
     try {
+      // Check if this is a callback query (button press)
+      if (this.telegramAdapter.hasCallbackQuery(payload)) {
+        const callbackResult = this.telegramAdapter.parseCallbackQuery(payload);
+        if (callbackResult) {
+          await this.handleTelegramCallback(callbackResult);
+          return;
+        }
+      }
+
       // Normalize the message
       const normalizedMessage = this.telegramAdapter.normalizeUpdate(payload);
 
@@ -77,6 +90,65 @@ export class WebhooksService {
       }
     } catch (error) {
       this.logger.error('Error processing Telegram webhook:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Handle Telegram callback query (button presses)
+   */
+  private async handleTelegramCallback(callback: CallbackQueryResult): Promise<void> {
+    this.logger.log(`Telegram callback received: ${callback.data} from chat ${callback.chatId}`);
+
+    try {
+      // Acknowledge the callback query first
+      await this.telegramAdapter.answerCallbackQuery(callback.callbackQueryId);
+
+      const language = callback.language || 'en';
+
+      // Handle different callback types
+      switch (callback.data) {
+        case 'consent_approve':
+          this.logger.log(`User ${callback.chatId} approved consent`);
+          await this.orchestratorService.handleCallbackConsentResponse(
+            callback.chatId,
+            true,
+            language,
+          );
+          break;
+
+        case 'consent_decline':
+          this.logger.log(`User ${callback.chatId} declined consent`);
+          await this.orchestratorService.handleCallbackConsentResponse(
+            callback.chatId,
+            false,
+            language,
+          );
+          break;
+
+        case 'flow_form':
+          this.logger.log(`User ${callback.chatId} selected form flow`);
+          await this.orchestratorService.handleCallbackFlowSelection(
+            callback.chatId,
+            'form',
+            language,
+          );
+          break;
+
+        case 'flow_chat':
+          this.logger.log(`User ${callback.chatId} selected chat flow`);
+          await this.orchestratorService.handleCallbackFlowSelection(
+            callback.chatId,
+            'chat',
+            language,
+          );
+          break;
+
+        default:
+          this.logger.warn(`Unknown callback data: ${callback.data}`);
+      }
+    } catch (error) {
+      this.logger.error('Error handling Telegram callback:', error);
       throw error;
     }
   }
