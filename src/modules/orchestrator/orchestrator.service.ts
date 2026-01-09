@@ -460,7 +460,7 @@ export class OrchestratorService {
         
         // If photo request and template not yet sent, send ONLY template (AI message skipped)
         if (isPhotoRequest && treatmentCategory && !photoTemplateSent) {
-          this.logger.log(`Sending photo template for lead ${data.leadId} - AI message will be skipped`);
+          this.logger.log(`Sending photo template for lead ${data.leadId} - AI message will be SKIPPED entirely`);
           
           // Send template image only
           const templateSent = await this.sendTemplateImageIfAvailable(
@@ -488,16 +488,44 @@ export class OrchestratorService {
             await this.supabase.updateLead(data.leadId, { status: 'WAITING_PHOTOS' });
             
             // DON'T send AI message - template is enough
-            // Schedule follow-up and return
+            // Schedule follow-up and return IMMEDIATELY
             await this.scheduleAiDrivenFollowup(
               data.leadId, 
               data.conversationId, 
               lead.language || 'en',
               data.desireScore,
             );
-            return;
+            
+            this.logger.log(`Template sent successfully for lead ${data.leadId} - returning without sending AI message`);
+            return; // CRITICAL: Exit here to prevent AI message from being sent
           }
           // If template failed, continue with AI message as fallback
+          this.logger.warn(`Template send failed for lead ${data.leadId} - falling back to AI message`);
+        }
+
+        // If photo request but template was already sent, skip the AI photo request message entirely
+        // The user already has the template, no need to repeat photo instructions
+        if (isPhotoRequest && treatmentCategory && photoTemplateSent) {
+          this.logger.log(`Photo template already sent for lead ${data.leadId} - skipping AI photo request message`);
+          
+          // Save a note that we skipped redundant photo request
+          await this.supabase.createMessage({
+            conversation_id: data.conversationId,
+            lead_id: data.leadId,
+            direction: 'out',
+            content: `[Skipped: Photo request - template already sent]`,
+            sender_type: 'system',
+            ai_run_id: data.aiRunId,
+          });
+          
+          // Schedule follow-up and return
+          await this.scheduleAiDrivenFollowup(
+            data.leadId, 
+            data.conversationId, 
+            lead.language || 'en',
+            data.desireScore,
+          );
+          return; // Don't send AI message asking for photos again
         }
 
         // Split message into parts for human-like conversation
@@ -513,9 +541,6 @@ export class OrchestratorService {
           sender_type: 'ai',
           ai_run_id: data.aiRunId,
         });
-
-        // If photo request but template was already sent, AI can remind about missing photos
-        // No need to send template again
         
         // Queue each message part with SMART delay for human-like delivery
         // Delay is calculated based on message length to simulate typing
