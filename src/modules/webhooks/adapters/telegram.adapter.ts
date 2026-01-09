@@ -289,5 +289,189 @@ export class TelegramAdapter {
       throw error;
     }
   }
+
+  /**
+   * Send message with inline keyboard buttons
+   */
+  async sendMessageWithInlineKeyboard(
+    chatId: string,
+    text: string,
+    buttons: Array<Array<{ text: string; callback_data: string }>>,
+  ): Promise<string> {
+    try {
+      const response = await this.axiosInstance.post(`${this.apiUrl}/sendMessage`, {
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: buttons,
+        },
+      });
+
+      const messageId = response.data.result?.message_id?.toString();
+      this.logger.log(`Telegram inline keyboard message sent: ${messageId}`);
+      return messageId;
+    } catch (error: any) {
+      this.logger.error('Failed to send Telegram inline keyboard message:', error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Send KVKK consent message with approval buttons
+   */
+  async sendKvkkConsentMessage(
+    chatId: string,
+    language: string,
+    kvkkLinkUrl: string,
+  ): Promise<string> {
+    const messages: Record<string, { text: string; approve: string; decline: string }> = {
+      tr: {
+        text: `Size daha iyi yardımcı olabilmem için birkaç bilgi ve fotoğraf isteyeceğim.\n\nPaylaştığınız bilgiler yalnızca doktor değerlendirmesi için kullanılacaktır.\n\n📋 <a href="${kvkkLinkUrl}">KVKK Aydınlatma Metni</a>\n\n<i>Verileriniz güvende tutulacaktır.</i>`,
+        approve: '✅ Onaylıyorum',
+        decline: '❌ Onaylamıyorum',
+      },
+      en: {
+        text: `To better assist you, I'll need to ask for some information and photos.\n\nThe information you share will only be used for doctor evaluation.\n\n📋 <a href="${kvkkLinkUrl}">Privacy Policy</a>\n\n<i>Your data will be kept safe.</i>`,
+        approve: '✅ I Approve',
+        decline: '❌ I Decline',
+      },
+      ar: {
+        text: `لمساعدتك بشكل أفضل، سأحتاج إلى بعض المعلومات والصور.\n\nالمعلومات التي تشاركها ستُستخدم فقط لتقييم الطبيب.\n\n📋 <a href="${kvkkLinkUrl}">سياسة الخصوصية</a>\n\n<i>بياناتك ستبقى آمنة.</i>`,
+        approve: '✅ أوافق',
+        decline: '❌ لا أوافق',
+      },
+      fr: {
+        text: `Pour mieux vous aider, j'aurai besoin de quelques informations et photos.\n\nLes informations partagées seront uniquement utilisées pour l'évaluation médicale.\n\n📋 <a href="${kvkkLinkUrl}">Politique de confidentialité</a>\n\n<i>Vos données seront protégées.</i>`,
+        approve: '✅ J\'approuve',
+        decline: '❌ Je refuse',
+      },
+    };
+
+    const msg = messages[language] || messages.en;
+
+    return this.sendMessageWithInlineKeyboard(chatId, msg.text, [
+      [
+        { text: msg.approve, callback_data: 'consent_approve' },
+        { text: msg.decline, callback_data: 'consent_decline' },
+      ],
+    ]);
+  }
+
+  /**
+   * Send flow selection after KVKK approval (Form vs Chat)
+   */
+  async sendFlowSelectionMessage(
+    chatId: string,
+    language: string,
+    formUrl: string,
+  ): Promise<string> {
+    const messages: Record<string, { text: string; form: string; chat: string }> = {
+      tr: {
+        text: `Teşekkürler! Şimdi nasıl devam etmek istersiniz?\n\n📝 <b>Form:</b> Bilgilerinizi hızlıca form üzerinden doldurun.\n💬 <b>Danışman:</b> Benimle sohbet ederek ilerleyin.`,
+        form: '📝 Form ile devam',
+        chat: '💬 Danışmanla devam',
+      },
+      en: {
+        text: `Thank you! How would you like to continue?\n\n📝 <b>Form:</b> Quickly fill out your information via form.\n💬 <b>Consultant:</b> Continue chatting with me.`,
+        form: '📝 Continue with Form',
+        chat: '💬 Chat with Consultant',
+      },
+      ar: {
+        text: `شكراً! كيف تريد المتابعة؟\n\n📝 <b>النموذج:</b> املأ معلوماتك بسرعة عبر النموذج.\n💬 <b>المستشار:</b> تابع الدردشة معي.`,
+        form: '📝 متابعة بالنموذج',
+        chat: '💬 الدردشة مع مستشار',
+      },
+      fr: {
+        text: `Merci! Comment souhaitez-vous continuer?\n\n📝 <b>Formulaire:</b> Remplissez rapidement vos informations.\n💬 <b>Consultant:</b> Continuez à discuter avec moi.`,
+        form: '📝 Continuer avec Form',
+        chat: '💬 Discuter avec Consultant',
+      },
+    };
+
+    const msg = messages[language] || messages.en;
+
+    return this.sendMessageWithInlineKeyboard(chatId, msg.text, [
+      [
+        { text: msg.form, callback_data: 'flow_form' },
+        { text: msg.chat, callback_data: 'flow_chat' },
+      ],
+    ]);
+  }
+
+  /**
+   * Send form link message with inline button
+   */
+  async sendFormLinkMessage(
+    chatId: string,
+    language: string,
+    formUrl: string,
+  ): Promise<string> {
+    const messages: Record<string, { text: string; button: string }> = {
+      tr: {
+        text: `Harika seçim! 📝\n\nAşağıdaki butona tıklayarak formu doldurun.\nForm tamamlandığında doktorlarımız değerlendirecektir.`,
+        button: '📋 Formu Doldur',
+      },
+      en: {
+        text: `Great choice! 📝\n\nClick the button below to fill out the form.\nOnce completed, our doctors will evaluate.`,
+        button: '📋 Fill Out Form',
+      },
+      ar: {
+        text: `اختيار رائع! 📝\n\nانقر على الزر أدناه لملء النموذج.\nبمجرد الانتهاء، سيقوم أطباؤنا بالتقييم.`,
+        button: '📋 ملء النموذج',
+      },
+      fr: {
+        text: `Excellent choix! 📝\n\nCliquez sur le bouton ci-dessous pour remplir le formulaire.\nUne fois terminé, nos médecins évalueront.`,
+        button: '📋 Remplir le formulaire',
+      },
+    };
+
+    const msg = messages[language] || messages.en;
+
+    try {
+      // Send message with URL button (opens in browser)
+      const response = await this.axiosInstance.post(`${this.apiUrl}/sendMessage`, {
+        chat_id: chatId,
+        text: msg.text,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: msg.button, url: formUrl },
+            ],
+          ],
+        },
+      });
+
+      const messageId = response.data.result?.message_id?.toString();
+      this.logger.log(`Telegram form link message sent: ${messageId}`);
+      return messageId;
+    } catch (error: any) {
+      this.logger.error('Failed to send Telegram form link message:', error.message);
+      // Fallback to regular message with link
+      return this.sendMessage({ 
+        channel: 'telegram', 
+        channelUserId: chatId, 
+        content: `${msg.text}\n\n🔗 ${formUrl}` 
+      });
+    }
+  }
+
+  /**
+   * Answer callback query (acknowledge button press)
+   */
+  async answerCallbackQuery(
+    callbackQueryId: string,
+    text?: string,
+  ): Promise<void> {
+    try {
+      await this.axiosInstance.post(`${this.apiUrl}/answerCallbackQuery`, {
+        callback_query_id: callbackQueryId,
+        text,
+      });
+    } catch (error: any) {
+      this.logger.warn('Failed to answer callback query:', error.message);
+    }
+  }
 }
 

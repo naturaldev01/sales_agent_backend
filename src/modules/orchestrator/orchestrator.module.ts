@@ -8,6 +8,7 @@ import { MessagesModule } from '../messages/messages.module';
 import { AiClientModule } from '../ai-client/ai-client.module';
 import { FollowupsModule } from '../followups/followups.module';
 import { PhotosModule } from '../photos/photos.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { PhotosModule } from '../photos/photos.module';
     forwardRef(() => AiClientModule),
     forwardRef(() => FollowupsModule),
     forwardRef(() => PhotosModule),
+    forwardRef(() => NotificationsModule),
   ],
   controllers: [OrchestratorController],
   providers: [OrchestratorService, StateMachineService],

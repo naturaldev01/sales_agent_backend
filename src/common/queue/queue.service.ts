@@ -28,6 +28,12 @@ export interface ChannelSendPayload {
   mediaUrl?: string;
   mediaType?: string;
   delay?: number; // milliseconds to wait before sending (for human-like message splitting)
+  metadata?: {
+    messageType?: 'kvkk_consent' | 'flow_selection' | 'standard';
+    kvkkLinkUrl?: string;
+    formUrl?: string;
+    language?: string;
+  };
 }
 
 @Injectable()

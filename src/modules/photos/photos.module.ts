@@ -1,6 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { PhotosController } from './photos.controller';
 import { PhotosService } from './photos.service';
+import { PhotoAnalyzerService } from './photo-analyzer.service';
 import { SupabaseModule } from '../../common/supabase/supabase.module';
 import { QueueModule } from '../../common/queue/queue.module';
 import { AuthModule } from '../auth/auth.module';
@@ -14,8 +15,8 @@ import { AiClientModule } from '../ai-client/ai-client.module';
     forwardRef(() => AiClientModule),
   ],
   controllers: [PhotosController],
-  providers: [PhotosService],
-  exports: [PhotosService],
+  providers: [PhotosService, PhotoAnalyzerService],
+  exports: [PhotosService, PhotoAnalyzerService],
 })
 export class PhotosModule {}
 

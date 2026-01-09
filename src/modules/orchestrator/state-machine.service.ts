@@ -18,8 +18,11 @@ import { Injectable, Logger } from '@nestjs/common';
  */
 export type LeadStatus =
   | 'NEW'                  // Initial state - first contact
+  | 'WAITING_CONSENT'      // Waiting for KVKK/GDPR consent
   | 'QUALIFYING'           // Gathering initial info (treatment, concern area, timeline, medical history)
-  | 'PHOTO_REQUESTED'      // Photos have been requested (optional)
+  | 'WAITING_FORM'         // User chose form flow, waiting for form submission
+  | 'WAITING_PHOTOS'       // Waiting for photos (template sent)
+  | 'PHOTO_REQUESTED'      // Photos have been requested (optional) - legacy
   | 'PHOTO_COLLECTING'     // Receiving photos
   | 'PHOTO_QA_FIX'         // Photos received but need fixes (incomplete/poor quality)
   | 'READY_FOR_DOCTOR'     // All medical info collected, ready for doctor (photos optional)
@@ -35,13 +38,21 @@ export type LeadStatus =
  */
 export type LeadEvent =
   | 'MESSAGE_RECEIVED'        // User sent a message
+  | 'CONSENT_REQUESTED'       // KVKK/GDPR consent message sent
+  | 'CONSENT_GIVEN'           // User approved consent
+  | 'CONSENT_DECLINED'        // User declined consent
+  | 'FLOW_SELECTED_FORM'      // User chose form flow
+  | 'FLOW_SELECTED_CHAT'      // User chose chat flow
+  | 'FORM_SUBMITTED'          // Form submission received via webhook
   | 'PHOTO_RECEIVED'          // User sent a photo
+  | 'PHOTO_TEMPLATE_SENT'     // Photo template message sent
   | 'QUALIFYING_COMPLETE'     // Qualifying phase done, ready for photos
   | 'MEDICAL_COMPLETE'        // All medical questions answered (can go to doctor without photos)
   | 'PHOTOS_COMPLETE'         // All required photos received and validated
   | 'PHOTOS_DECLINED'         // User explicitly declined to send photos
   | 'PHOTOS_NEED_FIX'         // Photos received but need fixes
   | 'PHOTOS_FIXED'            // Fixed photos received
+  | 'MEDICAL_RISK_DETECTED'   // High-risk medical condition detected
   | 'FOLLOWUP_SENT'           // Follow-up message sent
   | 'MAX_FOLLOWUPS_REACHED'   // No response after max follow-ups
   | 'HANDOFF_REQUESTED'       // Human handoff requested
@@ -93,14 +104,90 @@ export class StateMachineService {
   // Define all valid state transitions
   private readonly transitions: StateTransition[] = [
     // ═══════════════════════════════════════════════════════════════════════
-    // NEW LEAD FLOW
+    // NEW V1 FLOW: NEW -> CONSENT -> FLOW_SELECTION -> FORM/CHAT
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // New lead receives first message -> Wait for consent
+    {
+      from: ['NEW'],
+      to: 'WAITING_CONSENT',
+      event: 'CONSENT_REQUESTED',
+    },
+
+    // User gives consent -> Move to qualifying
+    {
+      from: ['WAITING_CONSENT'],
+      to: 'QUALIFYING',
+      event: 'CONSENT_GIVEN',
+    },
+
+    // User declines consent -> Stay at waiting (can still chat generally)
+    {
+      from: ['WAITING_CONSENT'],
+      to: 'WAITING_CONSENT',
+      event: 'CONSENT_DECLINED',
+    },
+
+    // User selects form flow
+    {
+      from: ['QUALIFYING'],
+      to: 'WAITING_FORM',
+      event: 'FLOW_SELECTED_FORM',
+    },
+
+    // User selects chat flow - stay in qualifying
+    {
+      from: ['QUALIFYING'],
+      to: 'QUALIFYING',
+      event: 'FLOW_SELECTED_CHAT',
+    },
+
+    // Form submitted via webhook
+    {
+      from: ['WAITING_FORM'],
+      to: 'READY_FOR_DOCTOR',
+      event: 'FORM_SUBMITTED',
+    },
+
+    // Photo template sent -> waiting for photos
+    {
+      from: ['QUALIFYING'],
+      to: 'WAITING_PHOTOS',
+      event: 'PHOTO_TEMPLATE_SENT',
+    },
+
+    // Photo received while waiting for photos
+    {
+      from: ['WAITING_PHOTOS'],
+      to: 'PHOTO_COLLECTING',
+      event: 'PHOTO_RECEIVED',
+    },
+
+    // Medical risk detected - create notification but stay in flow
+    {
+      from: ['QUALIFYING', 'PHOTO_COLLECTING', 'WAITING_PHOTOS'],
+      to: 'READY_FOR_DOCTOR',
+      event: 'MEDICAL_RISK_DETECTED',
+    },
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // LEGACY NEW LEAD FLOW (backwards compatible)
     // ═══════════════════════════════════════════════════════════════════════
     
-    // New lead receives first message
+    // New lead receives first message (legacy - skip consent if already given)
     {
       from: ['NEW'],
       to: 'QUALIFYING',
       event: 'MESSAGE_RECEIVED',
+      condition: (ctx) => ctx.lead.consent_given === true,
+    },
+
+    // New lead without consent
+    {
+      from: ['NEW'],
+      to: 'WAITING_CONSENT',
+      event: 'MESSAGE_RECEIVED',
+      condition: (ctx) => ctx.lead.consent_given !== true,
     },
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -383,7 +470,8 @@ export class StateMachineService {
     const graph: Record<string, LeadEvent[]> = {};
 
     const allStates: LeadStatus[] = [
-      'NEW', 'QUALIFYING', 'PHOTO_REQUESTED', 'PHOTO_COLLECTING', 'PHOTO_QA_FIX',
+      'NEW', 'WAITING_CONSENT', 'QUALIFYING', 'WAITING_FORM', 'WAITING_PHOTOS',
+      'PHOTO_REQUESTED', 'PHOTO_COLLECTING', 'PHOTO_QA_FIX',
       'READY_FOR_DOCTOR', 'READY_FOR_SALES', 'WAITING_FOR_USER', 'DORMANT', 
       'HANDOFF_HUMAN', 'CONVERTED', 'CLOSED'
     ];
@@ -401,7 +489,10 @@ export class StateMachineService {
   getStateDescription(status: LeadStatus): string {
     const descriptions: Record<LeadStatus, string> = {
       'NEW': 'New lead - initial contact',
+      'WAITING_CONSENT': 'Waiting for KVKK/GDPR consent approval',
       'QUALIFYING': 'Gathering information (treatment, concerns, timeline, medical history)',
+      'WAITING_FORM': 'User chose form flow, waiting for form submission',
+      'WAITING_PHOTOS': 'Photo template sent, waiting for photos',
       'PHOTO_REQUESTED': 'Photos requested (optional)',
       'PHOTO_COLLECTING': 'Receiving and validating photos',
       'PHOTO_QA_FIX': 'Photos need fixes (quality issues or missing angles)',

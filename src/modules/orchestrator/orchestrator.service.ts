@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
@@ -13,6 +13,8 @@ import { QueueService } from '../../common/queue/queue.service';
 import { StateMachineService, LeadStatus } from './state-machine.service';
 import { NormalizedMessage } from '../webhooks/interfaces/normalized-message.interface';
 import { PhotosService } from '../photos/photos.service';
+import { PhotoAnalyzerService } from '../photos/photo-analyzer.service';
+import { DoctorNotificationsService } from '../notifications/doctor-notifications.service';
 
 @Injectable()
 export class OrchestratorService {
@@ -31,14 +33,24 @@ export class OrchestratorService {
   // Debounce delay in milliseconds (wait for more photos)
   private readonly PHOTO_DEBOUNCE_DELAY = 5000; // 5 seconds
 
+  // Environment variables for new features
+  private readonly kvkkLinkUrl: string;
+  private readonly patientFormUrl: string;
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly queueService: QueueService,
     private readonly stateMachine: StateMachineService,
     private readonly configService: ConfigService,
     private readonly photosService: PhotosService,
+    @Inject(forwardRef(() => PhotoAnalyzerService))
+    private readonly photoAnalyzer: PhotoAnalyzerService,
+    @Inject(forwardRef(() => DoctorNotificationsService))
+    private readonly doctorNotifications: DoctorNotificationsService,
   ) {
     this.telegramBotToken = this.configService.get<string>('TELEGRAM_BOT_TOKEN', '');
+    this.kvkkLinkUrl = this.configService.get<string>('KVKK_LINK_URL', 'https://naturalclinic.com/kvkk');
+    this.patientFormUrl = this.configService.get<string>('PATIENT_FORM_URL', 'https://health-form-six.vercel.app');
   }
 
   async handleIncomingMessage(message: NormalizedMessage): Promise<void> {
@@ -268,11 +280,39 @@ export class OrchestratorService {
         await this.addLeadTag(data.leadId, 'ANGRY_USER');
       }
 
+      // Handle KVKK consent button response (from callback query)
+      const isConsentResponse = (data as any).isConsentResponse;
+      if (isConsentResponse) {
+        const consentGiven = (data as any).consentGiven || false;
+        await this.handleConsentResponse(data.leadId, data.conversationId, consentGiven, lead);
+        return;
+      }
+
+      // Handle flow selection response (Form vs Chat from callback query)
+      const isFlowSelection = (data as any).isFlowSelection;
+      if (isFlowSelection) {
+        const selectedFlow = (data as any).selectedFlow || 'chat';
+        await this.handleFlowSelection(data.leadId, data.conversationId, selectedFlow, lead);
+        return;
+      }
+
       // Update lead with extracted data
       const updateData: Record<string, unknown> = {};
       
       if (data.desireScore !== undefined) {
         updateData.desire_score = data.desireScore;
+      }
+
+      // Handle medical risk detection
+      if (data.extraction?.high_risk_medical) {
+        const riskDetails = (data.extraction.high_risk_details as string) || 'Unknown risk';
+        const riskKeywords = (data.extraction.risk_keywords_found as string[]) || [];
+        await this.handleMedicalRisk(
+          data.leadId,
+          riskDetails,
+          riskKeywords,
+          lead.lead_profile?.name ?? undefined,
+        );
       }
 
       // Save agent name if this is a greeting (first contact)
@@ -346,6 +386,53 @@ export class OrchestratorService {
 
       // Save and send the reply
       if (data.replyDraft) {
+        // Check if this is a photo request - handle template logic
+        const isPhotoRequest = this.isPhotoRequestMessage(data.replyDraft, lead.language || 'en');
+        const treatmentCategory = lead.treatment_category;
+        const photoTemplateSent = await this.wasPhotoTemplateSent(data.leadId);
+        
+        // If photo request and template not yet sent, send ONLY template (AI message skipped)
+        if (isPhotoRequest && treatmentCategory && !photoTemplateSent) {
+          this.logger.log(`Sending photo template for lead ${data.leadId} - AI message will be skipped`);
+          
+          // Send template image only
+          const templateSent = await this.sendTemplateImageIfAvailable(
+            lead.channel as 'whatsapp' | 'telegram' | 'web',
+            lead.channel_user_id!,
+            treatmentCategory,
+            lead.language || 'en',
+          );
+          
+          if (templateSent) {
+            // Mark template as sent
+            await this.markPhotoTemplateSent(data.leadId);
+            
+            // Save a note in conversation history
+            await this.supabase.createMessage({
+              conversation_id: data.conversationId,
+              lead_id: data.leadId,
+              direction: 'out',
+              content: `[Photo template sent for ${treatmentCategory}]`,
+              sender_type: 'system',
+              ai_run_id: data.aiRunId,
+            });
+            
+            // Update lead status
+            await this.supabase.updateLead(data.leadId, { status: 'WAITING_PHOTOS' });
+            
+            // DON'T send AI message - template is enough
+            // Schedule follow-up and return
+            await this.scheduleAiDrivenFollowup(
+              data.leadId, 
+              data.conversationId, 
+              lead.language || 'en',
+              data.desireScore,
+            );
+            return;
+          }
+          // If template failed, continue with AI message as fallback
+        }
+
         // Split message into parts for human-like conversation
         const messageParts = this.splitMessageIntoParts(data.replyDraft);
         const fullMessageContent = messageParts.join('\n\n'); // Store full message in DB for history
@@ -360,20 +447,9 @@ export class OrchestratorService {
           ai_run_id: data.aiRunId,
         });
 
-        // Check if this is a photo request and we should send a template image
-        const isPhotoRequest = this.isPhotoRequestMessage(data.replyDraft, lead.language || 'en');
-        const treatmentCategory = lead.treatment_category;
+        // If photo request but template was already sent, AI can remind about missing photos
+        // No need to send template again
         
-        if (isPhotoRequest && treatmentCategory) {
-          // Try to send template image first
-          await this.sendTemplateImageIfAvailable(
-            lead.channel as 'whatsapp' | 'telegram' | 'web',
-            lead.channel_user_id!,
-            treatmentCategory,
-            lead.language || 'en',
-          );
-        }
-
         // Queue each message part with SMART delay for human-like delivery
         // Delay is calculated based on message length to simulate typing
         let cumulativeDelay = 0;
@@ -569,6 +645,212 @@ export class OrchestratorService {
     };
 
     return messages[language] || messages.en;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // New V1 Features: KVKK Consent, Flow Selection, Medical Risk
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Handle consent button response from user
+   */
+  private async handleConsentResponse(
+    leadId: string,
+    conversationId: string,
+    consentGiven: boolean,
+    lead: Lead & { lead_profile: LeadProfile | null },
+  ): Promise<void> {
+    const language = lead.language || 'en';
+
+    if (consentGiven) {
+      // Update consent in profile
+      await this.supabase.upsertLeadProfile(leadId, {
+        consent_given: true,
+        consent_at: new Date().toISOString(),
+        consent_version: '1.0',
+      });
+
+      this.logger.log(`Consent given by lead ${leadId}`);
+
+      // Send flow selection message (Form vs Chat)
+      await this.sendFlowSelectionMessage(lead, language);
+    } else {
+      // User declined consent
+      await this.supabase.upsertLeadProfile(leadId, {
+        consent_given: false,
+      });
+
+      // Send decline message
+      const declineMessages: Record<string, string> = {
+        tr: 'Anlıyoruz. Onay olmadan kişisel bilgi toplayamıyoruz, ancak genel sorularınızı yanıtlayabiliriz. Size nasıl yardımcı olabilirim?',
+        en: 'We understand. Without consent, we cannot collect personal information, but we can answer your general questions. How can I help you?',
+        ar: 'نتفهم ذلك. بدون موافقة، لا يمكننا جمع معلومات شخصية، لكن يمكننا الإجابة على أسئلتكم العامة. كيف يمكنني مساعدتك؟',
+        fr: 'Nous comprenons. Sans consentement, nous ne pouvons pas collecter d\'informations personnelles, mais nous pouvons répondre à vos questions générales. Comment puis-je vous aider?',
+      };
+
+      await this.queueService.addChannelSendJob({
+        channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+        channelUserId: lead.channel_user_id!,
+        content: declineMessages[language] || declineMessages.en,
+      });
+    }
+  }
+
+  /**
+   * Handle flow selection response (Form vs Chat)
+   */
+  private async handleFlowSelection(
+    leadId: string,
+    conversationId: string,
+    selectedFlow: 'form' | 'chat',
+    lead: Lead & { lead_profile: LeadProfile | null },
+  ): Promise<void> {
+    const language = lead.language || 'en';
+
+    // Save preference
+    await this.supabase.upsertLeadProfile(leadId, {
+      preferred_flow: selectedFlow,
+    } as any);
+
+    if (selectedFlow === 'form') {
+      // Send form link
+      const formUrl = `${this.patientFormUrl}?lead_id=${leadId}&lang=${language}`;
+      
+      const formMessages: Record<string, string> = {
+        tr: `Harika seçim! 📝\n\nFormu doldurmak için linke tıklayın:\n${formUrl}\n\nForm tamamlandığında doktorlarımız değerlendirecek.`,
+        en: `Great choice! 📝\n\nClick the link to fill out the form:\n${formUrl}\n\nOnce completed, our doctors will evaluate.`,
+        ar: `اختيار رائع! 📝\n\nانقر على الرابط لملء النموذج:\n${formUrl}\n\nبمجرد الانتهاء، سيقوم أطباؤنا بالتقييم.`,
+        fr: `Excellent choix! 📝\n\nCliquez sur le lien pour remplir le formulaire:\n${formUrl}\n\nUne fois terminé, nos médecins évalueront.`,
+      };
+
+      await this.queueService.addChannelSendJob({
+        channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+        channelUserId: lead.channel_user_id!,
+        content: formMessages[language] || formMessages.en,
+      });
+
+      // Update status
+      await this.supabase.updateLead(leadId, { status: 'WAITING_FORM' });
+      this.logger.log(`Lead ${leadId} chose form flow, link sent`);
+    } else {
+      // Continue with chat - send greeting and start qualification
+      const chatMessages: Record<string, string> = {
+        tr: 'Harika! Sizinle sohbet ederek ilerleyelim. 😊\n\nÖncelikle, hangi tedavi hakkında bilgi almak istiyorsunuz?',
+        en: 'Great! Let\'s continue chatting. 😊\n\nFirst, which treatment are you interested in?',
+        ar: 'رائع! دعنا نتابع الدردشة. 😊\n\nأولاً، ما هو العلاج الذي تهتم به؟',
+        fr: 'Super! Continuons à discuter. 😊\n\nTout d\'abord, quel traitement vous intéresse?',
+      };
+
+      await this.queueService.addChannelSendJob({
+        channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+        channelUserId: lead.channel_user_id!,
+        content: chatMessages[language] || chatMessages.en,
+      });
+
+      // Update status to qualifying
+      await this.supabase.updateLead(leadId, { status: 'QUALIFYING' });
+      this.logger.log(`Lead ${leadId} chose chat flow, starting qualification`);
+    }
+  }
+
+  /**
+   * Send flow selection message (Form vs Chat buttons)
+   */
+  private async sendFlowSelectionMessage(
+    lead: Lead & { lead_profile: LeadProfile | null },
+    language: string,
+  ): Promise<void> {
+    // This will be called after consent is given
+    // The actual button sending is done via channel-specific adapters in the queue job
+    // For now, queue a special flow selection message
+
+    const flowMessages: Record<string, string> = {
+      tr: 'Teşekkürler! Şimdi nasıl devam etmek istersiniz?\n\n📝 Form: Bilgilerinizi hızlıca form üzerinden doldurun.\n💬 Danışman: Benimle sohbet ederek ilerleyin.\n\nLütfen birini seçin:',
+      en: 'Thank you! How would you like to continue?\n\n📝 Form: Quickly fill out your information via form.\n💬 Consultant: Continue chatting with me.\n\nPlease choose one:',
+      ar: 'شكراً! كيف تريد المتابعة؟\n\n📝 النموذج: املأ معلوماتك بسرعة عبر النموذج.\n💬 المستشار: تابع الدردشة معي.\n\nيرجى الاختيار:',
+      fr: 'Merci! Comment souhaitez-vous continuer?\n\n📝 Formulaire: Remplissez rapidement vos informations.\n💬 Consultant: Continuez à discuter avec moi.\n\nVeuillez choisir:',
+    };
+
+    // Queue flow selection with special flag
+    await this.queueService.addChannelSendJob({
+      channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+      channelUserId: lead.channel_user_id!,
+      content: flowMessages[language] || flowMessages.en,
+      metadata: {
+        messageType: 'flow_selection',
+        formUrl: `${this.patientFormUrl}?lead_id=${lead.id}&lang=${language}`,
+      },
+    });
+  }
+
+  /**
+   * Handle medical risk detection
+   */
+  private async handleMedicalRisk(
+    leadId: string,
+    riskDetails: string,
+    keywordsFound: string[],
+    patientName?: string,
+  ): Promise<void> {
+    this.logger.warn(`Medical risk detected for lead ${leadId}: ${riskDetails}`);
+
+    // Update lead profile with risk flag
+    await this.supabase.upsertLeadProfile(leadId, {
+      medical_risk_detected: true,
+      medical_risk_details: riskDetails,
+    } as any);
+
+    // Add tag to lead
+    await this.addLeadTag(leadId, 'MEDICAL_RISK');
+
+    // Create doctor notification
+    await this.doctorNotifications.createMedicalRiskAlert(
+      leadId,
+      riskDetails,
+      keywordsFound,
+      patientName,
+    );
+  }
+
+  /**
+   * Send KVKK consent message with buttons
+   * Called for new leads or when consent is needed
+   */
+  async sendKvkkConsentMessage(
+    lead: Lead & { lead_profile: LeadProfile | null },
+  ): Promise<void> {
+    const language = lead.language || 'en';
+
+    // Queue consent message with special flag for interactive buttons
+    await this.queueService.addChannelSendJob({
+      channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+      channelUserId: lead.channel_user_id!,
+      content: '', // Content will be generated by adapter based on messageType
+      metadata: {
+        messageType: 'kvkk_consent',
+        kvkkLinkUrl: this.kvkkLinkUrl,
+        language,
+      },
+    });
+
+    this.logger.log(`KVKK consent message queued for lead ${lead.id}`);
+  }
+
+  /**
+   * Check if photo template was already sent
+   */
+  private async wasPhotoTemplateSent(leadId: string): Promise<boolean> {
+    const lead = await this.supabase.getLeadById(leadId);
+    return (lead.lead_profile as any)?.photo_template_sent === true;
+  }
+
+  /**
+   * Mark photo template as sent
+   */
+  private async markPhotoTemplateSent(leadId: string): Promise<void> {
+    await this.supabase.upsertLeadProfile(leadId, {
+      photo_template_sent: true,
+    } as any);
   }
 
   /**
@@ -922,6 +1204,26 @@ export class OrchestratorService {
       return;
     }
 
+    // Get lead for treatment category
+    const lead = await this.supabase.getLeadById(leadId);
+    const treatmentCategory = lead.treatment_category || 'hair_transplant';
+
+    // Analyze photo with Gemini to detect slot
+    let slotAnalysis;
+    try {
+      slotAnalysis = await this.photoAnalyzer.analyzePhotoSlot(fileBuffer, treatmentCategory);
+      this.logger.log(`Photo analyzed: slot=${slotAnalysis.detected_slot}, confidence=${slotAnalysis.confidence}`);
+    } catch (error) {
+      this.logger.error('Photo analysis failed:', error);
+      slotAnalysis = {
+        detected_slot: 'unknown',
+        confidence: 0,
+        quality_score: 50,
+        quality_issues: [],
+        is_usable: true,
+      };
+    }
+
     // Generate unique file name
     const assetId = uuidv4();
     const extension = 'jpg'; // Most Telegram photos are JPEG
@@ -940,16 +1242,89 @@ export class OrchestratorService {
       throw uploadError;
     }
 
-    // Save to photo_assets table
-    await this.supabase.createPhotoAsset({
-      lead_id: leadId,
-      storage_path: storagePath,
-      file_name: `${assetId}.${extension}`,
-      file_size: fileBuffer.length,
-      mime_type: 'image/jpeg',
-    });
+    // Save to photo_assets table with slot detection results
+    const { error: insertError } = await this.supabase.client
+      .from('photo_assets')
+      .insert({
+        lead_id: leadId,
+        storage_path: storagePath,
+        file_name: `${assetId}.${extension}`,
+        file_size: fileBuffer.length,
+        mime_type: 'image/jpeg',
+        checklist_key: slotAnalysis.detected_slot !== 'unknown' ? slotAnalysis.detected_slot : null,
+        detected_slot: slotAnalysis.detected_slot,
+        slot_confidence: slotAnalysis.confidence,
+        quality_score: slotAnalysis.quality_score,
+        quality_issues: slotAnalysis.quality_issues,
+        is_usable: slotAnalysis.is_usable,
+      });
 
-    this.logger.log(`Photo uploaded: ${storagePath}`);
+    if (insertError) {
+      this.logger.error('Failed to save photo asset:', insertError);
+      throw insertError;
+    }
+
+    this.logger.log(`Photo uploaded and analyzed: ${storagePath}, slot: ${slotAnalysis.detected_slot}`);
+
+    // Check photo completion status
+    await this.checkAndUpdatePhotoCompletion(leadId, treatmentCategory, lead.language || 'en');
+  }
+
+  /**
+   * Check photo completion and update lead status / send reminders
+   */
+  private async checkAndUpdatePhotoCompletion(
+    leadId: string,
+    treatmentCategory: string,
+    language: string,
+  ): Promise<void> {
+    // Get all uploaded photos for this lead
+    const photos = await this.supabase.getLeadPhotos(leadId);
+    const uploadedSlots = photos
+      .map(p => (p as any).detected_slot)
+      .filter(s => s && s !== 'unknown');
+
+    // Check completion status
+    const completion = this.photoAnalyzer.checkCompletion(uploadedSlots, treatmentCategory);
+
+    this.logger.log(`Photo completion for lead ${leadId}: ${completion.completion_percentage}% (${completion.total_uploaded}/${completion.total_required})`);
+
+    if (completion.is_complete) {
+      // All required photos received - update status
+      await this.supabase.upsertLeadProfile(leadId, {
+        photo_status: 'complete',
+      });
+
+      // Check if medical info is also complete, if so, mark ready for doctor
+      const lead = await this.supabase.getLeadById(leadId);
+      const profile = lead.lead_profile as any;
+      
+      const hasMedicalInfo = profile?.has_allergies !== undefined && 
+                            profile?.has_chronic_disease !== undefined;
+
+      if (hasMedicalInfo) {
+        await this.supabase.updateLead(leadId, { status: 'READY_FOR_DOCTOR' });
+        
+        // Create doctor notification
+        await this.doctorNotifications.createReadyForDoctorNotification(
+          leadId,
+          profile?.name,
+          treatmentCategory,
+          true,
+          true,
+        );
+        
+        this.logger.log(`Lead ${leadId} is ready for doctor review`);
+      }
+    } else {
+      // Update partial status
+      await this.supabase.upsertLeadProfile(leadId, {
+        photo_status: 'partial',
+      });
+
+      // Note: Missing photo reminder will be handled by AI in the next message
+      // The AI will see the completion status and ask for missing photos
+    }
   }
 
   private async queueAiJobWithPhotoDebounce(
