@@ -35,6 +35,16 @@ export class OrchestratorService {
   // Debounce delay in milliseconds (wait for more photos)
   private readonly PHOTO_DEBOUNCE_DELAY = 5000; // 5 seconds
 
+  // Virtual agent names by language for personalized greetings
+  private readonly AGENT_NAMES: Record<string, string[]> = {
+    tr: ['Ayşe', 'Zeynep', 'Elif', 'Merve', 'Selin', 'Deniz', 'Ece', 'Ceren', 'Büşra', 'Gizem'],
+    en: ['Emily', 'Sarah', 'Jessica', 'Amanda', 'Rachel', 'Nicole', 'Ashley', 'Lauren', 'Emma', 'Sophie'],
+    de: ['Anna', 'Sophie', 'Maria', 'Laura', 'Julia', 'Lisa', 'Lena', 'Hannah', 'Lea', 'Nina'],
+    ar: ['فاطمة', 'عائشة', 'مريم', 'زينب', 'سارة', 'ليلى', 'نور', 'هدى', 'دينا', 'رانيا'],
+    fr: ['Marie', 'Sophie', 'Camille', 'Julie', 'Laura', 'Léa', 'Chloé', 'Emma', 'Manon', 'Clara'],
+    default: ['Sarah', 'Emma', 'Sophie', 'Anna', 'Laura', 'Julia', 'Lisa', 'Nina', 'Maria', 'Elena'],
+  };
+
   // Environment variables for new features
   private readonly kvkkLinkUrl: string;
   private readonly patientFormUrl: string;
@@ -755,17 +765,37 @@ export class OrchestratorService {
     const language = lead.language || 'en';
 
     if (consentGiven) {
-      // Update consent in profile
+      // Generate random agent name for this lead
+      const agentName = this.getRandomAgentName(language);
+
+      // Update consent in profile and save agent name
       await this.supabase.upsertLeadProfile(leadId, {
         consent_given: true,
         consent_at: new Date().toISOString(),
         consent_version: '1.0',
+        agent_name: agentName,
       });
 
-      this.logger.log(`Consent given by lead ${leadId}`);
+      this.logger.log(`Consent given by lead ${leadId}, assigned agent: ${agentName}`);
 
-      // Send flow selection message (Form vs Chat)
-      await this.sendFlowSelectionMessage(lead, language);
+      // Directly continue with chat flow (Form selection removed from initial flow)
+      const chatMessages: Record<string, (name: string) => string> = {
+        tr: (name) => `Merhaba, ben Natural Clinic'ten ${name}. 😊\n\nÖncelikle onay verdiğiniz için teşekkür ederim. Hangi konuda yardımcı olabilirim?`,
+        en: (name) => `Hello, I'm ${name} from Natural Clinic. 😊\n\nFirst of all, thank you for giving your consent. How can I help you?`,
+        ar: (name) => `مرحباً، أنا ${name} من Natural Clinic. 😊\n\nأولاً، شكراً لك على موافقتك. كيف يمكنني مساعدتك؟`,
+        fr: (name) => `Bonjour, je suis ${name} de Natural Clinic. 😊\n\nTout d'abord, merci pour votre consentement. Comment puis-je vous aider?`,
+      };
+
+      const messageGenerator = chatMessages[language] || chatMessages.en;
+      await this.queueService.addChannelSendJob({
+        channel: lead.channel as 'whatsapp' | 'telegram' | 'web',
+        channelUserId: lead.channel_user_id!,
+        content: messageGenerator(agentName),
+      });
+
+      // Update status to qualifying
+      await this.supabase.updateLead(leadId, { status: 'QUALIFYING' });
+      this.logger.log(`Lead ${leadId} consent given, starting qualification`);
     } else {
       // User declined consent
       await this.supabase.upsertLeadProfile(leadId, {
@@ -984,27 +1014,40 @@ export class OrchestratorService {
     }
 
     if (consentGiven) {
-      // Update consent in profile
+      // Generate random agent name for this lead
+      const effectiveLanguage = language || lead.language || 'en';
+      const agentName = this.getRandomAgentName(effectiveLanguage);
+
+      // Update consent in profile and save agent name
       await this.supabase.upsertLeadProfile(lead.id, {
         consent_given: true,
         consent_at: new Date().toISOString(),
         consent_version: '1.0',
+        agent_name: agentName,
       });
 
       // Update lead status
       await this.supabase.updateLead(lead.id, { 
         status: 'QUALIFYING',
-        language: language || lead.language || undefined,
+        language: effectiveLanguage,
       });
 
-      this.logger.log(`Consent given by lead ${lead.id}, sending flow selection`);
+      this.logger.log(`Consent given by lead ${lead.id}, assigned agent: ${agentName}`);
 
-      // Send flow selection message (Form vs Chat) via adapter
-      await this.telegramAdapter.sendFlowSelectionMessage(
+      // Directly continue with chat flow (Form selection removed from initial flow)
+      const chatMessages: Record<string, (name: string) => string> = {
+        tr: (name) => `Merhaba, ben Natural Clinic'ten ${name}. 😊\n\nÖncelikle onay verdiğiniz için teşekkür ederim. Hangi konuda yardımcı olabilirim?`,
+        en: (name) => `Hello, I'm ${name} from Natural Clinic. 😊\n\nFirst of all, thank you for giving your consent. How can I help you?`,
+        ar: (name) => `مرحباً، أنا ${name} من Natural Clinic. 😊\n\nأولاً، شكراً لك على موافقتك. كيف يمكنني مساعدتك؟`,
+        fr: (name) => `Bonjour, je suis ${name} de Natural Clinic. 😊\n\nTout d'abord, merci pour votre consentement. Comment puis-je vous aider?`,
+      };
+
+      const messageGenerator = chatMessages[effectiveLanguage] || chatMessages.en;
+      await this.telegramAdapter.sendMessage({
+        channel: 'telegram',
         channelUserId,
-        language || lead.language || 'en',
-        `${this.patientFormUrl}?lead_id=${lead.id}&lang=${language || lead.language || 'en'}`,
-      );
+        content: messageGenerator(agentName),
+      });
     } else {
       // User declined consent - stay in WAITING_CONSENT but allow general chat
       await this.supabase.upsertLeadProfile(lead.id, {
@@ -1100,6 +1143,15 @@ export class OrchestratorService {
     await this.supabase.upsertLeadProfile(leadId, {
       photo_template_sent: true,
     } as any);
+  }
+
+  /**
+   * Get a random agent name for the given language.
+   * Used for personalized greetings after consent.
+   */
+  private getRandomAgentName(language: string): string {
+    const names = this.AGENT_NAMES[language] || this.AGENT_NAMES.default;
+    return names[Math.floor(Math.random() * names.length)];
   }
 
   /**
