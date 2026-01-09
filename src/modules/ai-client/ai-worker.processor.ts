@@ -270,6 +270,64 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
 
     // Save and send the reply
     if (data.replyDraft && !data.shouldHandoff) {
+      // Check if this is a photo request - handle template logic
+      const isPhotoRequest = this.isPhotoRequestMessage(data.replyDraft, lead.language || 'en');
+      const treatmentCategory = (data.extraction?.treatment_category as string) || lead.treatment_category;
+      const photoTemplateSent = await this.wasPhotoTemplateSent(data.leadId);
+      
+      this.logger.log(`📸 Photo request check: isPhotoRequest=${isPhotoRequest}, treatmentCategory=${treatmentCategory}, templateSent=${photoTemplateSent}`);
+      
+      // If photo request and template not yet sent, send ONLY template (skip AI message)
+      if (isPhotoRequest && treatmentCategory && !photoTemplateSent && lead.channel_user_id) {
+        this.logger.log(`📸 Sending photo template for lead ${data.leadId} - AI message will be SKIPPED`);
+        
+        const templateSent = await this.sendTemplateImageIfAvailable(
+          lead.channel as 'whatsapp' | 'telegram' | 'web',
+          lead.channel_user_id,
+          treatmentCategory,
+          lead.language || 'en',
+        );
+        
+        if (templateSent) {
+          // Mark template as sent
+          await this.markPhotoTemplateSent(data.leadId);
+          
+          // Save a note in conversation history
+          await this.supabase.createMessage({
+            conversation_id: data.conversationId,
+            lead_id: data.leadId,
+            direction: 'out',
+            content: `[Photo template sent for ${treatmentCategory}]`,
+            sender_type: 'system',
+            ai_run_id: data.aiRunId,
+          });
+          
+          // Update lead status to waiting for photos
+          await this.supabase.updateLead(data.leadId, { status: 'WAITING_PHOTOS' });
+          
+          this.logger.log(`✅ Template sent for lead ${data.leadId} - returning without AI message`);
+          return; // CRITICAL: Exit here to prevent AI message
+        }
+        
+        this.logger.warn(`⚠️ Template send failed for lead ${data.leadId} - falling back to AI message`);
+      }
+      
+      // If photo request but template already sent, skip AI photo message entirely
+      if (isPhotoRequest && treatmentCategory && photoTemplateSent) {
+        this.logger.log(`📸 Photo template already sent for lead ${data.leadId} - skipping AI photo request`);
+        
+        await this.supabase.createMessage({
+          conversation_id: data.conversationId,
+          lead_id: data.leadId,
+          direction: 'out',
+          content: `[Skipped: Photo request - template already sent]`,
+          sender_type: 'system',
+          ai_run_id: data.aiRunId,
+        });
+        
+        return; // Don't send AI message asking for photos again
+      }
+      
       // Split message into parts for human-like conversation
       const messageParts = this.splitMessageIntoParts(data.replyDraft);
       const fullMessageContent = messageParts.join('\n\n'); // Store full message in DB for history
@@ -282,34 +340,6 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
         sender_type: 'ai',
         ai_run_id: data.aiRunId,
       });
-
-      // Check if this is a photo request and send template image first
-      const isPhotoRequest = this.isPhotoRequestMessage(data.replyDraft, lead.language || 'en');
-      // Use updated treatment_category from extraction if available, otherwise from lead
-      const treatmentCategory = (data.extraction?.treatment_category as string) || lead.treatment_category;
-      
-      this.logger.log(`📸 Photo request check: isPhotoRequest=${isPhotoRequest}, treatmentCategory=${treatmentCategory}`);
-      
-      if (isPhotoRequest && treatmentCategory && lead.channel_user_id) {
-        // Send template image BEFORE text messages
-        const templateSent = await this.sendTemplateImageIfAvailable(
-          lead.channel as 'whatsapp' | 'telegram' | 'web',
-          lead.channel_user_id,
-          treatmentCategory,
-          lead.language || 'en',
-        );
-        
-        if (!templateSent) {
-          this.logger.warn(`⚠️ Template image could not be sent for ${treatmentCategory}/${lead.language || 'en'}`);
-        }
-        
-        // Small delay after sending image before sending text
-        if (templateSent) {
-          await this.delay(1500);
-        }
-      } else if (isPhotoRequest && !treatmentCategory) {
-        this.logger.warn(`⚠️ Photo request detected but treatment_category is not set for lead ${data.leadId}`);
-      }
 
       // Send message parts via the appropriate channel with SMART delays
       if (lead.channel_user_id) {
@@ -522,6 +552,23 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
     }
 
     return profile;
+  }
+
+  /**
+   * Check if photo template was already sent to this lead
+   */
+  private async wasPhotoTemplateSent(leadId: string): Promise<boolean> {
+    const lead = await this.supabase.getLeadById(leadId);
+    return (lead.lead_profile as any)?.photo_template_sent === true;
+  }
+
+  /**
+   * Mark photo template as sent for this lead
+   */
+  private async markPhotoTemplateSent(leadId: string): Promise<void> {
+    await this.supabase.upsertLeadProfile(leadId, {
+      photo_template_sent: true,
+    } as any);
   }
 
   /**
