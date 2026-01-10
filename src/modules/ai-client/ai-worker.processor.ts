@@ -264,6 +264,21 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    // Check if ready for doctor evaluation (all medical history collected)
+    if (data.readyForDoctor) {
+      updateData.status = 'READY_FOR_DOCTOR';
+      this.logger.log(`🩺 Lead ${data.leadId} is ready for doctor evaluation - all medical history collected`);
+      
+      // Add tag if no photos
+      const profile = lead.lead_profile as Record<string, unknown> | null;
+      if (!profile || profile.photo_status !== 'complete') {
+        await this.addLeadTag(data.leadId, 'NO_PHOTOS');
+      }
+
+      // Send notification to dashboard
+      await this.sendDoctorReadyNotification(data.leadId, lead);
+    }
+
     if (Object.keys(updateData).length > 0) {
       await this.supabase.updateLead(data.leadId, updateData);
     }
@@ -779,5 +794,54 @@ export class AiWorkerProcessor implements OnModuleInit, OnModuleDestroy {
         caption: caption,
       },
     );
+  }
+
+  /**
+   * Add a tag to lead for tracking/filtering
+   */
+  private async addLeadTag(leadId: string, tag: string): Promise<void> {
+    try {
+      const lead = await this.supabase.getLeadById(leadId);
+      if (!lead) return;
+
+      const currentTags = ((lead as Record<string, unknown>).tags as string[]) || [];
+      if (!currentTags.includes(tag)) {
+        await this.supabase.updateLead(leadId, {
+          tags: [...currentTags, tag],
+        });
+        this.logger.log(`🏷️ Added tag "${tag}" to lead ${leadId}`);
+      }
+    } catch (error) {
+      this.logger.warn(`Failed to add tag "${tag}" to lead ${leadId}:`, error);
+    }
+  }
+
+  /**
+   * Send notification when lead is ready for doctor evaluation
+   */
+  private async sendDoctorReadyNotification(leadId: string, lead: any): Promise<void> {
+    try {
+      // Create a notification record for the dashboard
+      const notificationData = {
+        type: 'doctor_ready',
+        lead_id: leadId,
+        title: 'Lead Ready for Doctor',
+        body: `Lead ${lead.name || lead.channel_user_id || leadId} is ready for doctor evaluation`,
+        data: {
+          leadId,
+          channel: lead.channel,
+          treatmentCategory: lead.treatment_category,
+          language: lead.language,
+        },
+      };
+
+      // Insert notification (assuming notifications table exists)
+      await this.supabase.createNotification(notificationData);
+      
+      this.logger.log(`📢 Doctor ready notification sent for lead ${leadId}`);
+    } catch (error) {
+      this.logger.warn(`Failed to send doctor ready notification for lead ${leadId}:`, error);
+      // Non-critical, don't throw
+    }
   }
 }

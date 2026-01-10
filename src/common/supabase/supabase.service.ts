@@ -911,6 +911,41 @@ export class SupabaseService implements OnModuleInit {
     return data?.config_value ?? null;
   }
 
+  // ==================== NOTIFICATIONS ====================
+
+  async createNotification(data: {
+    type: string;
+    lead_id?: string;
+    title: string;
+    body?: string;
+    data?: Record<string, unknown>;
+  }): Promise<void> {
+    try {
+      // Insert into sales_notifications table
+      // Required fields: lead_id, notification_type, title
+      if (!data.lead_id) {
+        this.logger.warn('createNotification called without lead_id, skipping');
+        return;
+      }
+
+      const { error } = await this.supabase
+        .from('sales_notifications')
+        .insert({
+          lead_id: data.lead_id,
+          notification_type: data.type,
+          title: data.title,
+          message: data.body || null,
+          metadata: data.data as Json,
+        });
+
+      if (error) {
+        this.logger.warn(`Failed to create notification: ${error.message}`);
+      }
+    } catch (err) {
+      this.logger.warn('Error creating notification:', err);
+    }
+  }
+
   // ==================== STORAGE ====================
 
   async uploadFile(bucket: string, path: string, file: Buffer, contentType: string) {

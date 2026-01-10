@@ -1730,7 +1730,7 @@ export class OrchestratorService {
       await this.supabase.cancelPendingFollowups(leadId);
 
       // Get AI Python service URL
-      const aiServiceUrl = this.configService.get<string>('AI_SERVICE_URL', 'http://localhost:8001');
+      const aiServiceUrl = this.configService.get<string>('AI_SERVICE_URL', 'http://localhost:8000');
       
       // Get conversation history
       const messages = await this.supabase.getConversationMessages(conversationId, 15);
