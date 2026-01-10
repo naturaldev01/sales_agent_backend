@@ -468,8 +468,15 @@ export class OrchestratorService {
         const treatmentCategory = lead.treatment_category;
         const photoTemplateSent = await this.wasPhotoTemplateSent(data.leadId);
         
+        // ═══════════════════════════════════════════════════════════════════════
+        // CRITICAL: Check if minimum required info is collected BEFORE photo template
+        // Priority: Personal info + Medical history BEFORE photos
+        // ═══════════════════════════════════════════════════════════════════════
+        const hasRequiredInfoForPhotos = this.hasRequiredInfoBeforePhotos(lead);
+        
         // If photo request and template not yet sent, send ONLY template (AI message skipped)
-        if (isPhotoRequest && treatmentCategory && !photoTemplateSent) {
+        // BUT ONLY if we have collected the required information first
+        if (isPhotoRequest && treatmentCategory && !photoTemplateSent && hasRequiredInfoForPhotos) {
           this.logger.log(`Sending photo template for lead ${data.leadId} - AI message will be SKIPPED entirely`);
           
           // Send template image only
@@ -511,6 +518,27 @@ export class OrchestratorService {
           }
           // If template failed, continue with AI message as fallback
           this.logger.warn(`Template send failed for lead ${data.leadId} - falling back to AI message`);
+        }
+        
+        // If photo request but required info not collected yet, skip the photo request entirely
+        // AI should continue collecting personal/medical info first
+        if (isPhotoRequest && treatmentCategory && !photoTemplateSent && !hasRequiredInfoForPhotos) {
+          this.logger.log(`Photo request skipped for lead ${data.leadId} - required info not yet collected`);
+          
+          // Save a note that we skipped photo request
+          await this.supabase.createMessage({
+            conversation_id: data.conversationId,
+            lead_id: data.leadId,
+            direction: 'out',
+            content: `[Skipped: Photo request - personal/medical info not yet collected]`,
+            sender_type: 'system',
+            ai_run_id: data.aiRunId,
+          });
+          
+          // Don't send photo template, AI will continue with info gathering
+          // But also don't return - let the AI message through (if it's asking for info)
+          // The AI message might be asking for medical info + mentioning photos
+          // We'll filter out the photo request part and let the info request go through
         }
 
         // If photo request but template was already sent, skip the AI photo request message entirely
@@ -765,7 +793,27 @@ export class OrchestratorService {
     const language = lead.language || 'en';
 
     if (consentGiven) {
-      // Generate random agent name for this lead
+      // Check if agent name already assigned (prevents duplicate greetings)
+      const existingAgentName = (lead.lead_profile as any)?.agent_name;
+      
+      if (existingAgentName) {
+        // Already greeted before, just update consent and status without sending greeting again
+        this.logger.log(`Lead ${leadId} already has agent name ${existingAgentName}, skipping duplicate greeting`);
+        
+        await this.supabase.upsertLeadProfile(leadId, {
+          consent_given: true,
+          consent_at: new Date().toISOString(),
+          consent_version: '1.0',
+        });
+        
+        // Update status to qualifying if not already past that stage
+        if (lead.status === 'NEW' || lead.status === 'WAITING_CONSENT') {
+          await this.supabase.updateLead(leadId, { status: 'QUALIFYING' });
+        }
+        return;
+      }
+
+      // Generate random agent name for this lead (first time only)
       const agentName = this.getRandomAgentName(language);
 
       // Update consent in profile and save agent name
@@ -1014,8 +1062,32 @@ export class OrchestratorService {
     }
 
     if (consentGiven) {
-      // Generate random agent name for this lead
       const effectiveLanguage = language || lead.language || 'en';
+      
+      // Check if agent name already assigned (prevents duplicate greetings)
+      const existingAgentName = (lead.lead_profile as any)?.agent_name;
+      
+      if (existingAgentName) {
+        // Already greeted before, just update consent and status without sending greeting again
+        this.logger.log(`Lead ${lead.id} already has agent name ${existingAgentName}, skipping duplicate greeting`);
+        
+        await this.supabase.upsertLeadProfile(lead.id, {
+          consent_given: true,
+          consent_at: new Date().toISOString(),
+          consent_version: '1.0',
+        });
+        
+        // Update status if not already past QUALIFYING
+        if (lead.status === 'NEW' || lead.status === 'WAITING_CONSENT') {
+          await this.supabase.updateLead(lead.id, { 
+            status: 'QUALIFYING',
+            language: effectiveLanguage,
+          });
+        }
+        return;
+      }
+
+      // Generate random agent name for this lead (first time only)
       const agentName = this.getRandomAgentName(effectiveLanguage);
 
       // Update consent in profile and save agent name
@@ -1832,5 +1904,42 @@ export class OrchestratorService {
       // Fallback to simple scheduling if AI service fails
       await this.scheduleFollowupIfNeeded(leadId, conversationId);
     }
+  }
+
+  /**
+   * Check if minimum required information is collected before sending photo template.
+   * 
+   * Priority order for data collection:
+   * 1. Name (personal info)
+   * 2. Medical history basics (allergies, chronic diseases)
+   * 3. THEN photos
+   * 
+   * This prevents jumping to photos before gathering essential info.
+   */
+  private hasRequiredInfoBeforePhotos(lead: Lead & { lead_profile: LeadProfile | null }): boolean {
+    const profile = lead.lead_profile as Record<string, unknown> | null;
+    
+    if (!profile) {
+      this.logger.debug(`Lead ${lead.id}: No profile, required info not collected`);
+      return false;
+    }
+    
+    // Required: Name (at minimum we need to know who we're talking to)
+    const hasName = !!profile.name;
+    
+    // Required: At least one medical question answered
+    // (indicates we've started the medical history collection)
+    const hasAnyMedicalInfo = 
+      profile.has_allergies !== undefined && profile.has_allergies !== null ||
+      profile.has_chronic_disease !== undefined && profile.has_chronic_disease !== null ||
+      profile.has_blood_disease !== undefined && profile.has_blood_disease !== null;
+    
+    const isReady = hasName && hasAnyMedicalInfo;
+    
+    this.logger.debug(
+      `Lead ${lead.id}: hasRequiredInfoBeforePhotos = ${isReady} (hasName: ${hasName}, hasAnyMedicalInfo: ${hasAnyMedicalInfo})`
+    );
+    
+    return isReady;
   }
 }
