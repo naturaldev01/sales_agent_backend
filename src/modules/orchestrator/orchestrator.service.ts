@@ -1287,66 +1287,82 @@ export class OrchestratorService {
   }
 
   /**
-   * Check if a message is requesting photos from the user
-   * Enhanced with more keywords and photo instruction patterns
+   * Check if a message is EXPLICITLY requesting photos from the user.
+   * 
+   * STRICT MATCHING: Only trigger for clear photo requests, not just mentions.
+   * This prevents false positives from system notes or casual mentions.
    */
   private isPhotoRequestMessage(message: string, language: string): boolean {
-    const photoKeywords: Record<string, string[]> = {
+    // SKIP system notes - they should never trigger template
+    if (message.startsWith('[') && (message.includes('template') || message.includes('Skipped'))) {
+      return false;
+    }
+    
+    // SKIP very short messages (unlikely to be photo requests)
+    if (message.length < 20) {
+      return false;
+    }
+
+    // Use EXPLICIT photo request patterns - must be asking user to SEND photos
+    const photoRequestPatterns: Record<string, RegExp[]> = {
       en: [
-        'photo', 'picture', 'image', 'send us', 'share', 'upload',
-        'please send', 'could you send', 'would you send',
-        'front view', 'side view', 'top view', 'back view',
-        'show us', 'provide', 'attach'
+        /please\s+(send|share|upload)\s+(us\s+)?(your\s+)?photos?/i,
+        /could you\s+(send|share)\s+(us\s+)?photos?/i,
+        /would you\s+(send|share)\s+(us\s+)?photos?/i,
+        /we\s+need\s+(your\s+)?photos?/i,
+        /send\s+(us\s+)?photos?\s+(from|of)/i,
+        /can you\s+(send|share)\s+photos?/i,
       ],
       tr: [
-        'fotoğraf', 'resim', 'görsel', 'gönderin', 'paylaşın', 'yükleyin',
-        'lütfen gönderin', 'gönderir misiniz', 'gönderebilir misiniz',
-        'önden görünüm', 'yandan görünüm', 'tepeden görünüm',
-        'gösterin', 'paylaşabilir', 'fotoğraflarınızı'
+        /fotoğraf(lar)?(ınızı)?\s*(gönder|paylaş|yükle|atar\s*mısınız)/i,
+        /lütfen.*fotoğraf.*gönder/i,
+        /fotoğraf\s*(gönderebilir|paylaşabilir)\s*misiniz/i,
+        /bize\s*fotoğraf\s*(gönder|paylaş)/i,
+        /fotoğraflarınızı\s*(bekliyoruz|alabilir)/i,
       ],
       ar: [
-        'صور', 'صورة', 'ارسل', 'شارك', 'ارسال',
-        'يرجى إرسال', 'من فضلك ارسل',
-        'منظر أمامي', 'منظر جانبي'
-      ],
-      ru: [
-        'фото', 'фотографи', 'снимок', 'отправьте', 'загрузите',
-        'пожалуйста отправьте', 'можете отправить',
-        'вид спереди', 'вид сбоку'
+        /يرجى\s+إرسال\s+صور/i,
+        /هل\s+يمكنك\s+إرسال\s+صور/i,
+        /نحتاج\s+صور/i,
       ],
       fr: [
-        'photo', 'image', 'envoyez', 'partagez',
-        'veuillez envoyer', 'pouvez-vous envoyer',
-        'vue de face', 'profil'
+        /veuillez\s+(nous\s+)?envoyer.*photos?/i,
+        /pouvez-vous\s+(nous\s+)?envoyer.*photos?/i,
+        /envoyez-nous.*photos?/i,
+      ],
+      ru: [
+        /пожалуйста\s+отправьте.*фото/i,
+        /можете\s+(ли\s+)?(вы\s+)?отправить.*фото/i,
+        /пришлите.*фото/i,
       ],
     };
 
-    // Photo instruction patterns that strongly indicate photo request
-    const photoInstructionPatterns = [
-      /\d+\.\s*\*?\*?(front|önden|أمامي|спереди|face)/i,
-      /\d+\.\s*\*?\*?(side|yan|جانب|сбоку|profil)/i,
-      /\d+\.\s*\*?\*?(top|tepe|علوي|сверху|dessus)/i,
-      /\d+\.\s*\*?\*?(back|arka|خلف|сзади|arrière)/i,
-      /açılardan.*fotoğraf/i,
-      /photos from.*angles/i,
-      /صور من.*زوايا/i,
+    // Numbered photo instructions (strong signal - 1. Front view, 2. Side view etc.)
+    const numberedInstructionPatterns = [
+      /\d+\.\s*\*?\*?(front|önden|أمامي|спереди)\s*(view|görünüm)?/i,
+      /\d+\.\s*\*?\*?(side|yan|جانب|сбоку)\s*(view|görünüm)?/i,
+      /\d+\.\s*\*?\*?(top|tepe|علوي|сверху)\s*(view|görünüm)?/i,
+      /\d+\.\s*\*?\*?(back|arka|خلف|сзади)\s*(view|görünüm)?/i,
     ];
+    
+    // Check for numbered instructions (very strong signal)
+    const hasNumberedInstructions = numberedInstructionPatterns.some(pattern => pattern.test(message));
+    if (hasNumberedInstructions) {
+      this.logger.debug(`Photo request detected (numbered instructions): "${message.substring(0, 80)}..."`);
+      return true;
+    }
 
-    const keywords = photoKeywords[language] || photoKeywords.en;
-    // Also include English keywords as fallback since AI sometimes uses English terms
-    const allKeywords = [...new Set([...keywords, ...photoKeywords.en])];
-    const messageLower = message.toLowerCase();
+    // Check language-specific patterns
+    const patterns = photoRequestPatterns[language] || [];
+    const hasLanguagePattern = patterns.some(pattern => pattern.test(message));
     
-    // Check keywords
-    const hasKeyword = allKeywords.some(keyword => messageLower.includes(keyword.toLowerCase()));
+    // Also check English patterns as fallback
+    const hasEnglishPattern = photoRequestPatterns.en.some(pattern => pattern.test(message));
     
-    // Check instruction patterns
-    const hasInstructionPattern = photoInstructionPatterns.some(pattern => pattern.test(message));
-    
-    const isPhotoRequest = hasKeyword || hasInstructionPattern;
+    const isPhotoRequest = hasLanguagePattern || hasEnglishPattern;
     
     if (isPhotoRequest) {
-      this.logger.debug(`Photo request detected in message (language: ${language}): "${message.substring(0, 100)}..."`);
+      this.logger.debug(`Photo request detected (pattern match): "${message.substring(0, 80)}..."`);
     }
     
     return isPhotoRequest;
