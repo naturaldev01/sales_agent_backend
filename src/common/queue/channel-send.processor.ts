@@ -1,26 +1,38 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Logger, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { Worker, Job } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
 import IORedis from 'ioredis';
 import { ChannelSendPayload } from './queue.service';
-import { TelegramAdapter } from '../../modules/webhooks/adapters/telegram.adapter';
-import { WhatsappAdapter } from '../../modules/webhooks/adapters/whatsapp.adapter';
 
 @Injectable()
 export class ChannelSendProcessor implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ChannelSendProcessor.name);
   private worker!: Worker<ChannelSendPayload>;
   private connection!: IORedis;
+  
+  // Lazy-loaded adapters to avoid circular dependency
+  private telegramAdapter: any;
+  private whatsappAdapter: any;
 
   constructor(
     private readonly configService: ConfigService,
-    @Inject(forwardRef(() => TelegramAdapter))
-    private readonly telegramAdapter: TelegramAdapter,
-    @Inject(forwardRef(() => WhatsappAdapter))
-    private readonly whatsappAdapter: WhatsappAdapter,
+    private readonly moduleRef: ModuleRef,
   ) {}
 
   async onModuleInit() {
+    // Lazy load adapters to avoid circular dependency
+    try {
+      const { TelegramAdapter } = await import('../../modules/webhooks/adapters/telegram.adapter');
+      const { WhatsappAdapter } = await import('../../modules/webhooks/adapters/whatsapp.adapter');
+      
+      this.telegramAdapter = this.moduleRef.get(TelegramAdapter, { strict: false });
+      this.whatsappAdapter = this.moduleRef.get(WhatsappAdapter, { strict: false });
+    } catch (error) {
+      this.logger.warn('Could not load channel adapters, channel-send will be disabled', error);
+      return;
+    }
+
     // Support both REDIS_URL (Railway) and individual host/port/password config
     const redisUrl = this.configService.get<string>('REDIS_URL');
     
@@ -90,15 +102,11 @@ export class ChannelSendProcessor implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Processing channel send job: ${job.id} for ${channel}:${channelUserId}`);
 
     try {
-      // Handle different message types based on metadata
-      const messageTypeHandler = metadata?.messageType;
-
       if (channel === 'telegram') {
         await this.handleTelegramMessage(channelUserId, content, mediaUrl, mediaType, metadata);
       } else if (channel === 'whatsapp') {
         await this.handleWhatsappMessage(channelUserId, content, mediaUrl, mediaType, metadata);
       } else if (channel === 'web') {
-        // Web channel - typically handled differently (WebSocket, etc.)
         this.logger.warn(`Web channel send not implemented yet for ${channelUserId}`);
       } else {
         this.logger.warn(`Unknown channel: ${channel}`);
@@ -107,7 +115,7 @@ export class ChannelSendProcessor implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`✅ Message sent via ${channel} to ${channelUserId}`);
     } catch (error: unknown) {
       this.logger.error(`Error processing channel send job ${job.id}:`, error);
-      throw error; // Rethrow to trigger BullMQ retry
+      throw error;
     }
   }
 
@@ -118,25 +126,27 @@ export class ChannelSendProcessor implements OnModuleInit, OnModuleDestroy {
     mediaType?: string,
     metadata?: ChannelSendPayload['metadata'],
   ): Promise<void> {
+    if (!this.telegramAdapter) {
+      this.logger.error('Telegram adapter not available');
+      throw new Error('Telegram adapter not loaded');
+    }
+
     const messageType = metadata?.messageType;
     const language = metadata?.language || 'en';
 
     if (messageType === 'kvkk_consent' && metadata?.kvkkLinkUrl) {
-      // Send KVKK consent with buttons
       await this.telegramAdapter.sendKvkkConsentMessage(
         channelUserId,
         language,
         metadata.kvkkLinkUrl,
       );
     } else if (messageType === 'flow_selection' && metadata?.formUrl) {
-      // Send flow selection with buttons
       await this.telegramAdapter.sendFlowSelectionMessage(
         channelUserId,
         language,
         metadata.formUrl,
       );
     } else {
-      // Standard message
       await this.telegramAdapter.sendMessage({
         channel: 'telegram',
         channelUserId,
@@ -154,25 +164,27 @@ export class ChannelSendProcessor implements OnModuleInit, OnModuleDestroy {
     mediaType?: string,
     metadata?: ChannelSendPayload['metadata'],
   ): Promise<void> {
+    if (!this.whatsappAdapter) {
+      this.logger.error('WhatsApp adapter not available');
+      throw new Error('WhatsApp adapter not loaded');
+    }
+
     const messageType = metadata?.messageType;
     const language = metadata?.language || 'en';
 
     if (messageType === 'kvkk_consent' && metadata?.kvkkLinkUrl) {
-      // Send KVKK consent with buttons
       await this.whatsappAdapter.sendKvkkConsentMessage(
         channelUserId,
         language,
         metadata.kvkkLinkUrl,
       );
     } else if (messageType === 'flow_selection' && metadata?.formUrl) {
-      // Send flow selection with buttons
       await this.whatsappAdapter.sendFlowSelectionMessage(
         channelUserId,
         language,
         metadata.formUrl,
       );
     } else {
-      // Standard message
       await this.whatsappAdapter.sendMessage({
         channel: 'whatsapp',
         channelUserId,
